@@ -2,16 +2,29 @@ import React, { useMemo } from 'react';
 import { ToolViewProps } from '../types';
 import { GenericToolView } from '../GenericToolView';
 import { BrowserToolView } from '../BrowserToolView';
-import { CommandToolView } from '../CommandToolView';
-import { DataProviderToolView } from '../DataProviderToolView';
-import { ExposePortToolView } from '../ExposePortToolView';
-import { FileOperationToolView } from '../FileOperationToolView';
-import { StrReplaceToolView } from '../StrReplaceToolView';
+import { CommandToolView } from '../command-tool/CommandToolView';
+import { ExposePortToolView } from '../expose-port-tool/ExposePortToolView';
+import { FileOperationToolView } from '../file-operation/FileOperationToolView';
+import { StrReplaceToolView } from '../str-replace/StrReplaceToolView';
 import { WebCrawlToolView } from '../WebCrawlToolView';
-import { WebScrapeToolView } from '../WebScrapeToolView';
-import { WebSearchToolView } from '../WebSearchToolView';
-import { SeeImageToolView } from '../SeeImageToolView';
-import { TerminateCommandToolView } from '../TerminateCommandToolView';
+import { WebScrapeToolView } from '../web-scrape-tool/WebScrapeToolView';
+import { WebSearchToolView } from '../web-search-tool/WebSearchToolView';
+import { SeeImageToolView } from '../see-image-tool/SeeImageToolView';
+import { TerminateCommandToolView } from '../command-tool/TerminateCommandToolView';
+import { AskToolView } from '../ask-tool/AskToolView';
+import { CompleteToolView } from '../CompleteToolView';
+import { ExecuteDataProviderCallToolView } from '../data-provider-tool/ExecuteDataProviderCallToolView';
+import { DataProviderEndpointsToolView } from '../data-provider-tool/DataProviderEndpointsToolView';
+import { DeployToolView } from '../DeployToolView';
+import { SearchMcpServersToolView } from '../search-mcp-servers/search-mcp-servers';
+import { GetAppDetailsToolView } from '../get-app-details/get-app-details';
+import { CreateCredentialProfileToolView } from '../create-credential-profile/create-credential-profile';
+import { ConnectCredentialProfileToolView } from '../connect-credential-profile/connect-credential-profile';
+import { CheckProfileConnectionToolView } from '../check-profile-connection/check-profile-connection';
+import { ConfigureProfileForAgentToolView } from '../configure-profile-for-agent/configure-profile-for-agent';
+import { GetCredentialProfilesToolView } from '../get-credential-profiles/get-credential-profiles';
+import { GetCurrentAgentConfigToolView } from '../get-current-agent-config/get-current-agent-config';
+
 
 export type ToolViewComponent = React.ComponentType<ToolViewProps>;
 
@@ -35,12 +48,15 @@ const defaultRegistry: ToolViewRegistryType = {
   'browser-click-coordinates': BrowserToolView,
 
   'execute-command': CommandToolView,
+  'check-command-output': GenericToolView,
   'terminate-command': TerminateCommandToolView,
+  'list-commands': GenericToolView,
 
   'create-file': FileOperationToolView,
   'delete-file': FileOperationToolView,
   'full-file-rewrite': FileOperationToolView,
   'read-file': FileOperationToolView,
+  'edit-file': FileOperationToolView,
 
   'str-replace': StrReplaceToolView,
 
@@ -48,13 +64,28 @@ const defaultRegistry: ToolViewRegistryType = {
   'crawl-webpage': WebCrawlToolView,
   'scrape-webpage': WebScrapeToolView,
 
-  'execute-data-provider-call': DataProviderToolView,
-  'get-data-provider-endpoints': DataProviderToolView,
-  'get_data_provider_endpoints': DataProviderToolView,
+  'execute-data-provider-call': ExecuteDataProviderCallToolView,
+  'get-data-provider-endpoints': DataProviderEndpointsToolView,
+
+  'search-mcp-servers': SearchMcpServersToolView,
+  'get-app-details': GetAppDetailsToolView,
+  'create-credential-profile': CreateCredentialProfileToolView,
+  'connect-credential-profile': ConnectCredentialProfileToolView,
+  'check-profile-connection': CheckProfileConnectionToolView,
+  'configure-profile-for-agent': ConfigureProfileForAgentToolView,
+  'get-credential-profiles': GetCredentialProfilesToolView,
+  'get-current-agent-config': GetCurrentAgentConfigToolView,
 
   'expose-port': ExposePortToolView,
 
   'see-image': SeeImageToolView,
+
+  'call-mcp-tool': GenericToolView,
+
+  'ask': AskToolView,
+  'complete': CompleteToolView,
+
+  'deploy': DeployToolView,
 
   'default': GenericToolView,
 };
@@ -63,7 +94,14 @@ class ToolViewRegistry {
   private registry: ToolViewRegistryType;
 
   constructor(initialRegistry: Partial<ToolViewRegistryType> = {}) {
-    this.registry = { ...defaultRegistry, ...initialRegistry };
+    this.registry = { ...defaultRegistry };
+    
+    // Only add non-undefined values from initialRegistry
+    Object.entries(initialRegistry).forEach(([key, value]) => {
+      if (value !== undefined) {
+        this.registry[key] = value;
+      }
+    });
   }
 
   register(toolName: string, component: ToolViewComponent): void {

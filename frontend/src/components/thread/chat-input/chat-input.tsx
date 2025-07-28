@@ -7,13 +7,27 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from 'react';
-import { motion } from 'framer-motion';
-import { Loader2, X } from 'lucide-react';
+import { useAgents } from '@/hooks/react-query/agents/use-agents';
+
 import { Card, CardContent } from '@/components/ui/card';
 import { handleFiles } from './file-upload-handler';
 import { MessageInput } from './message-input';
 import { AttachmentGroup } from '../attachment-group';
 import { useModelSelection } from './_use-model-selection';
+import { useFileDelete } from '@/hooks/react-query/files';
+import { useQueryClient } from '@tanstack/react-query';
+import { ToolCallInput } from './floating-tool-preview';
+import { ChatSnack } from './chat-snack';
+import { Brain, Zap, Workflow, Database } from 'lucide-react';
+import { FaGoogle, FaDiscord } from 'react-icons/fa';
+import { SiNotion } from 'react-icons/si';
+import { AgentConfigModal } from '@/components/agents/agent-config-modal';
+import { PipedreamRegistry } from '@/components/agents/pipedream/pipedream-registry';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useSubscriptionWithStreaming } from '@/hooks/react-query/subscriptions/use-subscriptions';
+import { isLocalMode } from '@/lib/config';
+import { BillingModal } from '@/components/billing/billing-modal';
+import { useRouter } from 'next/navigation';
 
 export interface ChatInputHandles {
   getPendingFiles: () => File[];
@@ -36,6 +50,24 @@ export interface ChatInputProps {
   onFileBrowse?: () => void;
   sandboxId?: string;
   hideAttachments?: boolean;
+  selectedAgentId?: string;
+  onAgentSelect?: (agentId: string | undefined) => void;
+  agentName?: string;
+  messages?: any[];
+  bgColor?: string;
+  toolCalls?: ToolCallInput[];
+  toolCallIndex?: number;
+  showToolPreview?: boolean;
+  onExpandToolPreview?: () => void;
+  isLoggedIn?: boolean;
+  enableAdvancedConfig?: boolean;
+  onConfigureAgent?: (agentId: string) => void;
+  hideAgentSelection?: boolean;
+  defaultShowSnackbar?: 'tokens' | 'upgrade' | false;
+  showToLowCreditUsers?: boolean;
+  agentMetadata?: {
+    is_suna_default?: boolean;
+  };
 }
 
 export interface UploadedFile {
@@ -45,6 +77,8 @@ export interface UploadedFile {
   type: string;
   localUrl?: string;
 }
+
+
 
 export const ChatInput = forwardRef<ChatInputHandles, ChatInputProps>(
   (
@@ -61,19 +95,44 @@ export const ChatInput = forwardRef<ChatInputHandles, ChatInputProps>(
       onFileBrowse,
       sandboxId,
       hideAttachments = false,
+      selectedAgentId,
+      onAgentSelect,
+      agentName,
+      messages = [],
+      bgColor = 'bg-card',
+      toolCalls = [],
+      toolCallIndex = 0,
+      showToolPreview = false,
+      onExpandToolPreview,
+      isLoggedIn = true,
+      enableAdvancedConfig = false,
+      onConfigureAgent,
+      hideAgentSelection = false,
+      defaultShowSnackbar = false,
+      showToLowCreditUsers = true,
+      agentMetadata,
     },
     ref,
   ) => {
     const isControlled =
       controlledValue !== undefined && controlledOnChange !== undefined;
+    const router = useRouter();
 
     const [uncontrolledValue, setUncontrolledValue] = useState('');
     const value = isControlled ? controlledValue : uncontrolledValue;
+
+    const isSunaAgent = agentMetadata?.is_suna_default || false;
 
     const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
     const [pendingFiles, setPendingFiles] = useState<File[]>([]);
     const [isUploading, setIsUploading] = useState(false);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
+    const [configModalOpen, setConfigModalOpen] = useState(false);
+    const [configModalTab, setConfigModalTab] = useState('integrations');
+    const [registryDialogOpen, setRegistryDialogOpen] = useState(false);
+    const [showSnackbar, setShowSnackbar] = useState(defaultShowSnackbar);
+    const [userDismissedUsage, setUserDismissedUsage] = useState(false);
+    const [billingModalOpen, setBillingModalOpen] = useState(false);
 
     const {
       selectedModel,
@@ -85,13 +144,103 @@ export const ChatInput = forwardRef<ChatInputHandles, ChatInputProps>(
       refreshCustomModels,
     } = useModelSelection();
 
-    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const { data: subscriptionData } = useSubscriptionWithStreaming(isAgentRunning);
+    const deleteFileMutation = useFileDelete();
+    const queryClient = useQueryClient();
+
+    // Show usage preview logic:
+    // - Always show to free users when showToLowCreditUsers is true
+    // - For paid users, only show when they're at 70% or more of their cost limit (30% or below remaining)
+    const shouldShowUsage = !isLocalMode() && subscriptionData && showToLowCreditUsers && (() => {
+      // Free users: always show
+      if (subscriptionStatus === 'no_subscription') {
+        return true;
+      }
+
+      // Paid users: only show when at 70% or more of cost limit
+      const currentUsage = subscriptionData.current_usage || 0;
+      const costLimit = subscriptionData.cost_limit || 0;
+
+      if (costLimit === 0) return false; // No limit set
+
+      return currentUsage >= (costLimit * 0.7); // 70% or more used (30% or less remaining)
+    })();
+
+    // Auto-show usage preview when we have subscription data
+    useEffect(() => {
+      if (shouldShowUsage && defaultShowSnackbar !== false && !userDismissedUsage && (showSnackbar === false || showSnackbar === defaultShowSnackbar)) {
+        setShowSnackbar('upgrade');
+      } else if (!shouldShowUsage && showSnackbar !== false) {
+        setShowSnackbar(false);
+      }
+    }, [subscriptionData, showSnackbar, defaultShowSnackbar, shouldShowUsage, subscriptionStatus, showToLowCreditUsers, userDismissedUsage]);
+
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const hasLoadedFromLocalStorage = useRef(false);
+    
+    const { data: agentsResponse } = useAgents();
+    const agents = agentsResponse?.agents || [];
 
     useImperativeHandle(ref, () => ({
       getPendingFiles: () => pendingFiles,
       clearPendingFiles: () => setPendingFiles([]),
     }));
+
+    useEffect(() => {
+      if (typeof window !== 'undefined' && onAgentSelect && !hasLoadedFromLocalStorage.current && agents.length > 0) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const hasAgentIdInUrl = urlParams.has('agent_id');
+        if (!selectedAgentId && !hasAgentIdInUrl) {
+          const savedAgentId = localStorage.getItem('lastSelectedAgentId');
+          if (savedAgentId) {
+            if (savedAgentId === 'suna') {
+              const defaultSunaAgent = agents.find(agent => agent.metadata?.is_suna_default);
+              if (defaultSunaAgent) {
+                onAgentSelect(defaultSunaAgent.agent_id);
+              } else {
+                onAgentSelect(undefined);
+              }
+            } else {
+              onAgentSelect(savedAgentId);
+            }
+          } else {
+            const defaultSunaAgent = agents.find(agent => agent.metadata?.is_suna_default);
+            if (defaultSunaAgent) {
+              console.log('Auto-selecting default Suna agent:', defaultSunaAgent.agent_id);
+              onAgentSelect(defaultSunaAgent.agent_id);
+            } else if (agents.length > 0) {
+              console.log('No default Suna agent found, selecting first available agent:', agents[0].agent_id);
+              onAgentSelect(agents[0].agent_id);
+            } else {
+              console.log('No agents available, keeping undefined');
+              onAgentSelect(undefined);
+            }
+          }
+        } else {
+          console.log('Skipping localStorage load:', {
+            hasSelectedAgent: !!selectedAgentId,
+            hasAgentIdInUrl,
+            selectedAgentId
+          });
+        }
+        hasLoadedFromLocalStorage.current = true;
+      }
+    }, [onAgentSelect, selectedAgentId, agents]); // Add agents to dependencies
+
+    // Save selected agent to localStorage whenever it changes
+    useEffect(() => {
+      if (typeof window !== 'undefined' && agents.length > 0) {
+        // Check if the selected agent is the Suna default agent
+        const selectedAgent = agents.find(agent => agent.agent_id === selectedAgentId);
+        const isSunaAgent = selectedAgent?.metadata?.is_suna_default || selectedAgentId === undefined;
+        
+        // Use 'suna' as a special key for the Suna default agent
+        const keyToStore = isSunaAgent ? 'suna' : selectedAgentId;
+        console.log('Saving selected agent to localStorage:', keyToStore, 'for selectedAgentId:', selectedAgentId);
+        localStorage.setItem('lastSelectedAgentId', keyToStore);
+      }
+    }, [selectedAgentId, agents]);
 
     useEffect(() => {
       if (autoFocus && textareaRef.current) {
@@ -150,15 +299,49 @@ export const ChatInput = forwardRef<ChatInputHandles, ChatInputProps>(
       }
     };
 
+    const handleTranscription = (transcribedText: string) => {
+      const currentValue = isControlled ? controlledValue : uncontrolledValue;
+      const newValue = currentValue ? `${currentValue} ${transcribedText}` : transcribedText;
+
+      if (isControlled) {
+        controlledOnChange(newValue);
+      } else {
+        setUncontrolledValue(newValue);
+      }
+    };
+
     const removeUploadedFile = (index: number) => {
       const fileToRemove = uploadedFiles[index];
+
+      // Clean up local URL if it exists
       if (fileToRemove.localUrl) {
         URL.revokeObjectURL(fileToRemove.localUrl);
       }
 
+      // Remove from local state immediately for responsive UI
       setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
       if (!sandboxId && pendingFiles.length > index) {
         setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+      }
+
+      // Check if file is referenced in existing chat messages before deleting from server
+      const isFileUsedInChat = messages.some(message => {
+        const content = typeof message.content === 'string' ? message.content : '';
+        return content.includes(`[Uploaded File: ${fileToRemove.path}]`);
+      });
+
+      // Only delete from server if file is not referenced in chat history
+      if (sandboxId && fileToRemove.path && !isFileUsedInChat) {
+        deleteFileMutation.mutate({
+          sandboxId,
+          filePath: fileToRemove.path,
+        }, {
+          onError: (error) => {
+            console.error('Failed to delete file from server:', error);
+          }
+        });
+      } else if (isFileUsedInChat) {
+        console.log(`Skipping server deletion for ${fileToRemove.path} - file is referenced in chat history`);
       }
     };
 
@@ -174,84 +357,188 @@ export const ChatInput = forwardRef<ChatInputHandles, ChatInputProps>(
       setIsDraggingOver(false);
     };
 
+
+
     return (
-      <div className="mx-auto w-full max-w-4xl px-4">
-        <Card
-          className="shadow-none w-full max-w-4xl mx-auto bg-transparent border-none rounded-xl overflow-hidden"
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDraggingOver(false);
-
-            if (fileInputRef.current && e.dataTransfer.files.length > 0) {
-              const files = Array.from(e.dataTransfer.files);
-              handleFiles(
-                files,
-                sandboxId,
-                setPendingFiles,
-                setUploadedFiles,
-                setIsUploading,
-              );
-            }
-          }}
-        >
-          <div className="w-full text-sm flex flex-col justify-between items-start rounded-lg">
-            <CardContent className="w-full p-1.5 pb-2 bg-sidebar rounded-2xl border">
-              <AttachmentGroup
-                files={uploadedFiles || []}
-                sandboxId={sandboxId}
-                onRemove={removeUploadedFile}
-                layout="inline"
-                maxHeight="216px"
-                showPreviews={true}
-              />
-
-              <MessageInput
-                ref={textareaRef}
-                value={value}
-                onChange={handleChange}
-                onSubmit={handleSubmit}
-                placeholder={placeholder}
-                loading={loading}
-                disabled={disabled}
-                isAgentRunning={isAgentRunning}
-                onStopAgent={onStopAgent}
-                isDraggingOver={isDraggingOver}
-                uploadedFiles={uploadedFiles}
-
-                fileInputRef={fileInputRef}
-                isUploading={isUploading}
-                sandboxId={sandboxId}
-                setPendingFiles={setPendingFiles}
-                setUploadedFiles={setUploadedFiles}
-                setIsUploading={setIsUploading}
-                hideAttachments={hideAttachments}
-
-                selectedModel={selectedModel}
-                onModelChange={handleModelChange}
-                modelOptions={modelOptions}
-                subscriptionStatus={subscriptionStatus}
-                canAccessModel={canAccessModel}
-                refreshCustomModels={refreshCustomModels}
-              />
-            </CardContent>
-          </div>
-        </Card>
-
-        {isAgentRunning && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="pb-4 -mt-4 w-full flex items-center justify-center"
+      <div className="mx-auto w-full max-w-4xl relative">
+        <div className="relative">
+          <ChatSnack
+            toolCalls={toolCalls}
+            toolCallIndex={toolCallIndex}
+            onExpandToolPreview={onExpandToolPreview}
+            agentName={agentName}
+            showToolPreview={showToolPreview}
+            showUsagePreview={showSnackbar}
+            subscriptionData={subscriptionData}
+            onCloseUsage={() => { setShowSnackbar(false); setUserDismissedUsage(true); }}
+            onOpenUpgrade={() => setBillingModalOpen(true)}
+            isVisible={showToolPreview || !!showSnackbar}
+          />
+          <Card
+            className={`-mb-2 shadow-none w-full max-w-4xl mx-auto bg-transparent border-none overflow-visible ${enableAdvancedConfig && selectedAgentId ? '' : 'rounded-3xl'} relative`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingOver(false);
+              if (fileInputRef.current && e.dataTransfer.files.length > 0) {
+                const files = Array.from(e.dataTransfer.files);
+                handleFiles(
+                  files,
+                  sandboxId,
+                  setPendingFiles,
+                  setUploadedFiles,
+                  setIsUploading,
+                  messages,
+                  queryClient,
+                );
+              }
+            }}
           >
-            <div className="text-xs text-muted-foreground flex items-center gap-2">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              <span>Kortix Suna is working...</span>
+
+
+            <div className="w-full text-sm flex flex-col justify-between items-start rounded-lg">
+              <CardContent className={`w-full p-1.5 ${enableAdvancedConfig && selectedAgentId ? 'pb-1' : 'pb-2'} ${bgColor} border ${enableAdvancedConfig && selectedAgentId ? 'rounded-t-3xl' : 'rounded-3xl'}`}>
+                <AttachmentGroup
+                  files={uploadedFiles || []}
+                  sandboxId={sandboxId}
+                  onRemove={removeUploadedFile}
+                  layout="inline"
+                  maxHeight="216px"
+                  showPreviews={true}
+                />
+                <MessageInput
+                  ref={textareaRef}
+                  value={value}
+                  onChange={handleChange}
+                  onSubmit={handleSubmit}
+                  onTranscription={handleTranscription}
+                  placeholder={placeholder}
+                  loading={loading}
+                  disabled={disabled}
+                  isAgentRunning={isAgentRunning}
+                  onStopAgent={onStopAgent}
+                  isDraggingOver={isDraggingOver}
+                  uploadedFiles={uploadedFiles}
+
+                  fileInputRef={fileInputRef}
+                  isUploading={isUploading}
+                  sandboxId={sandboxId}
+                  setPendingFiles={setPendingFiles}
+                  setUploadedFiles={setUploadedFiles}
+                  setIsUploading={setIsUploading}
+                  hideAttachments={hideAttachments}
+                  messages={messages}
+
+                  selectedModel={selectedModel}
+                  onModelChange={handleModelChange}
+                  modelOptions={modelOptions}
+                  subscriptionStatus={subscriptionStatus}
+                  canAccessModel={canAccessModel}
+                  refreshCustomModels={refreshCustomModels}
+                  isLoggedIn={isLoggedIn}
+
+                  selectedAgentId={selectedAgentId}
+                  onAgentSelect={onAgentSelect}
+                  hideAgentSelection={hideAgentSelection}
+                />
+              </CardContent>
+
+              {enableAdvancedConfig && selectedAgentId && (
+              <div className="w-full border-t border-border/30 bg-muted/20 px-4 py-1.5 rounded-b-3xl border-l border-r border-b border-border">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto scrollbar-none">
+                    <button
+                      onClick={() => setRegistryDialogOpen(true)}
+                      className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-all duration-200 px-2.5 py-1.5 rounded-md hover:bg-muted/50 border border-transparent hover:border-border/30 flex-shrink-0"
+                    >
+                      <div className="flex items-center -space-x-0.5">
+                        <div className="w-5 h-5 bg-white dark:bg-muted border border-border rounded-full flex items-center justify-center shadow-sm">
+                          <FaGoogle className="w-3 h-3" />
+                        </div>
+                        <div className="w-5 h-5 bg-white dark:bg-muted border border-border rounded-full flex items-center justify-center shadow-sm">
+                          <FaDiscord className="w-3 h-3" />
+                        </div>
+                        <div className="w-5 h-5 bg-white dark:bg-muted border border-border rounded-full flex items-center justify-center shadow-sm">
+                          <SiNotion className="w-3 h-3" />
+                        </div>
+                      </div>
+                      <span className="text-xs font-medium">Integrations</span>
+                    </button>
+                    
+                    <div className="w-px h-4 bg-border/60" />
+                    
+                    <button
+                      onClick={() => router.push(`/agents/config/${selectedAgentId}?tab=configuration&accordion=instructions`)}
+                      className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-all duration-200 px-2.5 py-1.5 rounded-md hover:bg-muted/50 border border-transparent hover:border-border/30 flex-shrink-0"
+                    >
+                      <Brain className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span className="text-xs font-medium">Instructions</span>
+                    </button>
+                    
+                    <div className="w-px h-4 bg-border/60" />
+                    
+                    <button
+                      onClick={() => router.push(`/agents/config/${selectedAgentId}?tab=configuration&accordion=knowledge`)}
+                      className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-all duration-200 px-2.5 py-1.5 rounded-md hover:bg-muted/50 border border-transparent hover:border-border/30 flex-shrink-0"
+                    >
+                      <Database className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span className="text-xs font-medium">Knowledge</span>
+                    </button>
+                    
+                    <div className="w-px h-4 bg-border/60" />
+                    
+                    <button
+                      onClick={() => router.push(`/agents/config/${selectedAgentId}?tab=configuration&accordion=triggers`)}
+                      className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-all duration-200 px-2.5 py-1.5 rounded-md hover:bg-muted/50 border border-transparent hover:border-border/30 flex-shrink-0"
+                    >
+                      <Zap className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span className="text-xs font-medium">Triggers</span>
+                    </button>
+                    
+                    <div className="w-px h-4 bg-border/60" />
+                    
+                    <button
+                      onClick={() => router.push(`/agents/config/${selectedAgentId}?tab=configuration&accordion=workflows`)}
+                      className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-all duration-200 px-2.5 py-1.5 rounded-md hover:bg-muted/50 border border-transparent hover:border-border/30 flex-shrink-0"
+                    >
+                      <Workflow className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span className="text-xs font-medium">Workflows</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             </div>
-          </motion.div>
-        )}
+          </Card>
+          <AgentConfigModal
+            isOpen={configModalOpen}
+            onOpenChange={setConfigModalOpen}
+            selectedAgentId={selectedAgentId}
+            onAgentSelect={onAgentSelect}
+            initialTab={configModalTab}
+          />
+          <Dialog open={registryDialogOpen} onOpenChange={setRegistryDialogOpen}>
+            <DialogContent className="p-0 max-w-6xl max-h-[90vh] overflow-y-auto">
+              <DialogHeader className="sr-only">
+                <DialogTitle>Integrations</DialogTitle>
+              </DialogHeader>
+              <PipedreamRegistry
+                showAgentSelector={true}
+                selectedAgentId={selectedAgentId}
+                onAgentChange={onAgentSelect}
+                onToolsSelected={(profileId, selectedTools, appName, appSlug) => {
+                  console.log('Tools selected:', { profileId, selectedTools, appName, appSlug });
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+          <BillingModal
+            open={billingModalOpen}
+            onOpenChange={setBillingModalOpen}
+          />
+        </div>
       </div>
     );
   },

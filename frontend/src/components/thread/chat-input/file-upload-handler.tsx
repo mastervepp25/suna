@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Paperclip, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
+import { useQueryClient } from '@tanstack/react-query';
+import { fileQueryKeys } from '@/hooks/react-query/files/use-file-queries';
 import {
   Tooltip,
   TooltipContent,
@@ -12,6 +14,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { UploadedFile } from './chat-input';
+import { normalizeFilenameToNFC } from '@/lib/utils/unicode';
 
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
@@ -30,17 +33,23 @@ const handleLocalFiles = (
 
   setPendingFiles((prevFiles) => [...prevFiles, ...filteredFiles]);
 
-  const newUploadedFiles: UploadedFile[] = filteredFiles.map((file) => ({
-    name: file.name,
-    path: `/workspace/${file.name}`,
-    size: file.size,
-    type: file.type || 'application/octet-stream',
-    localUrl: URL.createObjectURL(file)
-  }));
+  const newUploadedFiles: UploadedFile[] = filteredFiles.map((file) => {
+    // Normalize filename to NFC
+    const normalizedName = normalizeFilenameToNFC(file.name);
+
+    return {
+      name: normalizedName,
+      path: `/workspace/${normalizedName}`,
+      size: file.size,
+      type: file.type || 'application/octet-stream',
+      localUrl: URL.createObjectURL(file)
+    };
+  });
 
   setUploadedFiles((prev) => [...prev, ...newUploadedFiles]);
   filteredFiles.forEach((file) => {
-    toast.success(`File attached: ${file.name}`);
+    const normalizedName = normalizeFilenameToNFC(file.name);
+    toast.success(`File attached: ${normalizedName}`);
   });
 };
 
@@ -49,6 +58,8 @@ const uploadFiles = async (
   sandboxId: string,
   setUploadedFiles: React.Dispatch<React.SetStateAction<UploadedFile[]>>,
   setIsUploading: React.Dispatch<React.SetStateAction<boolean>>,
+  messages: any[] = [], // Add messages parameter to check for existing files
+  queryClient?: any, // Add queryClient parameter for cache invalidation
 ) => {
   try {
     setIsUploading(true);
@@ -61,10 +72,20 @@ const uploadFiles = async (
         continue;
       }
 
-      const formData = new FormData();
-      formData.append('file', file);
+      // Normalize filename to NFC
+      const normalizedName = normalizeFilenameToNFC(file.name);
+      const uploadPath = `/workspace/${normalizedName}`;
 
-      const uploadPath = `/workspace/${file.name}`;
+      // Check if this filename already exists in chat messages
+      const isFileInChat = messages.some(message => {
+        const content = typeof message.content === 'string' ? message.content : '';
+        return content.includes(`[Uploaded File: ${uploadPath}]`);
+      });
+
+      const formData = new FormData();
+      // If the filename was normalized, append with the normalized name in the field name
+      // The server will use the path parameter for the actual filename
+      formData.append('file', file, normalizedName);
       formData.append('path', uploadPath);
 
       const supabase = createClient();
@@ -88,14 +109,31 @@ const uploadFiles = async (
         throw new Error(`Upload failed: ${response.statusText}`);
       }
 
+      // If file was already in chat and we have queryClient, invalidate its cache
+      if (isFileInChat && queryClient) {
+        console.log(`Invalidating cache for existing file: ${uploadPath}`);
+
+        // Invalidate all content types for this file
+        ['text', 'blob', 'json'].forEach(contentType => {
+          const queryKey = fileQueryKeys.content(sandboxId, uploadPath, contentType);
+          queryClient.removeQueries({ queryKey });
+        });
+
+        // Also invalidate directory listing
+        const directoryPath = uploadPath.substring(0, uploadPath.lastIndexOf('/'));
+        queryClient.invalidateQueries({
+          queryKey: fileQueryKeys.directory(sandboxId, directoryPath),
+        });
+      }
+
       newUploadedFiles.push({
-        name: file.name,
+        name: normalizedName,
         path: uploadPath,
         size: file.size,
         type: file.type || 'application/octet-stream',
       });
 
-      toast.success(`File uploaded: ${file.name}`);
+      toast.success(`File uploaded: ${normalizedName}`);
     }
 
     setUploadedFiles((prev) => [...prev, ...newUploadedFiles]);
@@ -119,10 +157,12 @@ const handleFiles = async (
   setPendingFiles: React.Dispatch<React.SetStateAction<File[]>>,
   setUploadedFiles: React.Dispatch<React.SetStateAction<UploadedFile[]>>,
   setIsUploading: React.Dispatch<React.SetStateAction<boolean>>,
+  messages: any[] = [], // Add messages parameter
+  queryClient?: any, // Add queryClient parameter
 ) => {
   if (sandboxId) {
     // If we have a sandboxId, upload files directly
-    await uploadFiles(files, sandboxId, setUploadedFiles, setIsUploading);
+    await uploadFiles(files, sandboxId, setUploadedFiles, setIsUploading, messages, queryClient);
   } else {
     // Otherwise, store files locally
     handleLocalFiles(files, setPendingFiles, setUploadedFiles);
@@ -138,6 +178,8 @@ interface FileUploadHandlerProps {
   setPendingFiles: React.Dispatch<React.SetStateAction<File[]>>;
   setUploadedFiles: React.Dispatch<React.SetStateAction<UploadedFile[]>>;
   setIsUploading: React.Dispatch<React.SetStateAction<boolean>>;
+  messages?: any[]; // Add messages prop
+  isLoggedIn?: boolean;
 }
 
 export const FileUploadHandler = forwardRef<
@@ -154,9 +196,12 @@ export const FileUploadHandler = forwardRef<
       setPendingFiles,
       setUploadedFiles,
       setIsUploading,
+      messages = [],
+      isLoggedIn = true,
     },
     ref,
   ) => {
+    const queryClient = useQueryClient();
     // Clean up object URLs when component unmounts
     useEffect(() => {
       return () => {
@@ -191,6 +236,8 @@ export const FileUploadHandler = forwardRef<
         setPendingFiles,
         setUploadedFiles,
         setIsUploading,
+        messages,
+        queryClient,
       );
 
       event.target.value = '';
@@ -201,26 +248,28 @@ export const FileUploadHandler = forwardRef<
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button
-                type="button"
-                onClick={handleFileUpload}
-                variant="ghost"
-                size="default"
-                className="h-7 rounded-md text-muted-foreground"
-                disabled={
-                  loading || (disabled && !isAgentRunning) || isUploading
-                }
-              >
-                {isUploading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Paperclip className="h-4 w-4" />
-                )}
-                <span className="text-sm sm:block hidden">Attachments</span>
-              </Button>
+              <span className="inline-block">
+                <Button
+                  type="button"
+                  onClick={handleFileUpload}
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-3 py-2 bg-transparent border border-border rounded-xl text-muted-foreground hover:text-foreground hover:bg-accent/50 flex items-center gap-2"
+                  disabled={
+                    !isLoggedIn || loading || (disabled && !isAgentRunning) || isUploading
+                  }
+                >
+                  {isUploading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Paperclip className="h-4 w-4" />
+                  )}
+                  <span className="text-sm">Attach</span>
+                </Button>
+              </span>
             </TooltipTrigger>
             <TooltipContent side="top">
-              <p>Attach files</p>
+              <p>{isLoggedIn ? 'Attach files' : 'Please login to attach files'}</p>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

@@ -1,5 +1,7 @@
 services:
   api:
+    image: ghcr.io/suna-ai/suna-backend:latest
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,6 +11,7 @@ services:
       - .env
     volumes:
       - .:/app
+      - /app/.venv
       - ./logs:/app/logs
     restart: unless-stopped
     depends_on:
@@ -30,14 +33,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "14"
-          memory: 48G
-        reservations:
-          cpus: "8"
-          memory: 32G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -45,16 +40,19 @@ services:
       retries: 3
       start_period: 40s
 
-  worker-1:
+  worker:
+    image: ghcr.io/suna-ai/suna-backend:latest
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
-    command: python -m dramatiq --processes 16 --threads 16 run_agent_background
+    command: uv run dramatiq --skip-logging --processes 4 --threads 4 run_agent_background
     env_file:
       - .env
     volumes:
       - .:/app
-      - ./worker-1-logs:/app/logs
+      - /app/.venv
+      - ./worker-logs:/app/logs
     restart: unless-stopped
     depends_on:
       redis:
@@ -75,56 +73,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "14"
-          memory: 48G
-        reservations:
-          cpus: "8"
-          memory: 32G
-
-  worker-2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: python -m dramatiq run_agent_background
-    env_file:
-      - .env
-    volumes:
-      - .:/app
-      - ./worker-2-logs:/app/logs
-    restart: unless-stopped
-    depends_on:
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - app-network
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-      - LOG_LEVEL=INFO
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "14"
-          memory: 48G
-        reservations:
-          cpus: "8"
-          memory: 32G
+    healthcheck:
+      test: ["CMD", "uv", "run", "worker_health.py"]
+      timeout: 20s
+      interval: 30s
+      start_period: 40s
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -145,14 +101,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 12G
-        reservations:
-          cpus: "1"
-          memory: 8G
 
   rabbitmq:
     image: rabbitmq
@@ -174,14 +122,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 12G
-        reservations:
-          cpus: "1"
-          memory: 8G
 
 networks:
   app-network:

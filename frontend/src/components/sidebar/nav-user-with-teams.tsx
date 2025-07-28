@@ -17,6 +17,7 @@ import {
   AudioWaveform,
   Sun,
   Moon,
+  KeyRound,
 } from 'lucide-react';
 import { useAccounts } from '@/hooks/use-accounts';
 import NewTeamForm from '@/components/basejump/new-team-form';
@@ -48,6 +49,7 @@ import {
 } from '@/components/ui/dialog';
 import { createClient } from '@/lib/supabase/client';
 import { useTheme } from 'next-themes';
+import { isLocalMode } from '@/lib/config';
 
 export function NavUserWithTeams({
   user,
@@ -182,13 +184,13 @@ export function NavUserWithTeams({
               </SidebarMenuButton>
             </DropdownMenuTrigger>
             <DropdownMenuContent
-              className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
+              className="w-(--radix-dropdown-menu-trigger-width) min-w-56"
               side={isMobile ? 'bottom' : 'top'}
               align="start"
               sideOffset={4}
             >
               <DropdownMenuLabel className="p-0 font-normal">
-                <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
+                <div className="flex items-center gap-2 px-1.5 py-1.5 text-left text-sm">
                   <Avatar className="h-8 w-8 rounded-lg">
                     <AvatarImage src={user.avatar} alt={user.name} />
                     <AvatarFallback className="rounded-lg">
@@ -286,6 +288,12 @@ export function NavUserWithTeams({
                     Billing
                   </Link>
                 </DropdownMenuItem>
+                {isLocalMode() && <DropdownMenuItem asChild>
+                  <Link href="/settings/env-manager">
+                    <KeyRound className="h-4 w-4" />
+                    Local .Env Manager
+                  </Link>
+                </DropdownMenuItem>}
                 {/* <DropdownMenuItem asChild>
                   <Link href="/settings">
                     <Settings className="mr-2 h-4 w-4" />

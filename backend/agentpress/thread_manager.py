@@ -11,7 +11,7 @@ This module provides comprehensive conversation management, including:
 """
 
 import json
-from typing import List, Dict, Any, Optional, Type, Union, AsyncGenerator, Literal
+from typing import List, Dict, Any, Optional, Type, Union, AsyncGenerator, Literal, cast
 from services.llm import make_llm_api_call
 from agentpress.tool import Tool
 from agentpress.tool_registry import ToolRegistry
@@ -25,6 +25,7 @@ from utils.logger import logger
 from langfuse.client import StatefulGenerationClient, StatefulTraceClient
 from services.langfuse import langfuse
 import datetime
+from litellm.utils import token_counter
 
 # Type alias for tool choice
 ToolChoice = Literal["auto", "required", "none"]
@@ -37,19 +38,30 @@ class ThreadManager:
     XML-based tool execution patterns.
     """
 
-    def __init__(self, trace: Optional[StatefulTraceClient] = None):
+    def __init__(self, trace: Optional[StatefulTraceClient] = None, is_agent_builder: bool = False, target_agent_id: Optional[str] = None, agent_config: Optional[dict] = None):
         """Initialize ThreadManager.
 
+        Args:
+            trace: Optional trace client for logging
+            is_agent_builder: Whether this is an agent builder session
+            target_agent_id: ID of the agent being built (if in agent builder mode)
+            agent_config: Optional agent configuration with version information
         """
         self.db = DBConnection()
         self.tool_registry = ToolRegistry()
         self.trace = trace
+        self.is_agent_builder = is_agent_builder
+        self.target_agent_id = target_agent_id
+        self.agent_config = agent_config
         if not self.trace:
             self.trace = langfuse.trace(name="anonymous:thread_manager")
         self.response_processor = ResponseProcessor(
             tool_registry=self.tool_registry,
             add_message_callback=self.add_message,
-            trace=self.trace
+            trace=self.trace,
+            is_agent_builder=self.is_agent_builder,
+            target_agent_id=self.target_agent_id,
+            agent_config=self.agent_config
         )
         self.context_manager = ContextManager()
 
@@ -63,7 +75,9 @@ class ThreadManager:
         type: str,
         content: Union[Dict[str, Any], List[Any], str],
         is_llm_message: bool = False,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        agent_id: Optional[str] = None,
+        agent_version_id: Optional[str] = None
     ):
         """Add a message to the thread in the database.
 
@@ -76,22 +90,30 @@ class ThreadManager:
                             Defaults to False (user message).
             metadata: Optional dictionary for additional message metadata.
                       Defaults to None, stored as an empty JSONB object if None.
+            agent_id: Optional ID of the agent associated with this message.
+            agent_version_id: Optional ID of the specific agent version used.
         """
-        logger.debug(f"Adding message of type '{type}' to thread {thread_id}")
+        logger.debug(f"Adding message of type '{type}' to thread {thread_id} (agent: {agent_id}, version: {agent_version_id})")
         client = await self.db.client
 
         # Prepare data for insertion
         data_to_insert = {
             'thread_id': thread_id,
             'type': type,
-            'content': json.dumps(content) if isinstance(content, (dict, list)) else content,
+            'content': content,
             'is_llm_message': is_llm_message,
-            'metadata': json.dumps(metadata or {}), # Ensure metadata is always a JSON object
+            'metadata': metadata or {},
         }
+        
+        # Add agent information if provided
+        if agent_id:
+            data_to_insert['agent_id'] = agent_id
+        if agent_version_id:
+            data_to_insert['agent_version_id'] = agent_version_id
 
         try:
-            # Add returning='representation' to get the inserted row data including the id
-            result = await client.table('messages').insert(data_to_insert, returning='representation').execute()
+            # Insert the message and get the inserted row data including the id
+            result = await client.table('messages').insert(data_to_insert).execute()
             logger.info(f"Successfully added message to thread {thread_id}")
 
             if result.data and len(result.data) > 0 and isinstance(result.data[0], dict) and 'message_id' in result.data[0]:
@@ -119,32 +141,48 @@ class ThreadManager:
         client = await self.db.client
 
         try:
-            result = await client.rpc('get_llm_formatted_messages', {'p_thread_id': thread_id}).execute()
+            # result = await client.rpc('get_llm_formatted_messages', {'p_thread_id': thread_id}).execute()
+            
+            # Fetch messages in batches of 1000 to avoid overloading the database
+            all_messages = []
+            batch_size = 1000
+            offset = 0
+            
+            while True:
+                result = await client.table('messages').select('message_id, content').eq('thread_id', thread_id).eq('is_llm_message', True).order('created_at').range(offset, offset + batch_size - 1).execute()
+                
+                if not result.data or len(result.data) == 0:
+                    break
+                    
+                all_messages.extend(result.data)
+                
+                # If we got fewer than batch_size records, we've reached the end
+                if len(result.data) < batch_size:
+                    break
+                    
+                offset += batch_size
+            
+            # Use all_messages instead of result.data in the rest of the method
+            result_data = all_messages
 
             # Parse the returned data which might be stringified JSON
-            if not result.data:
+            if not result_data:
                 return []
 
             # Return properly parsed JSON objects
             messages = []
-            for item in result.data:
-                if isinstance(item, str):
+            for item in result_data:
+                if isinstance(item['content'], str):
                     try:
-                        parsed_item = json.loads(item)
+                        parsed_item = json.loads(item['content'])
+                        parsed_item['message_id'] = item['message_id']
                         messages.append(parsed_item)
                     except json.JSONDecodeError:
-                        logger.error(f"Failed to parse message: {item}")
+                        logger.error(f"Failed to parse message: {item['content']}")
                 else:
-                    messages.append(item)
-
-            # Ensure tool_calls have properly formatted function arguments
-            for message in messages:
-                if message.get('tool_calls'):
-                    for tool_call in message['tool_calls']:
-                        if isinstance(tool_call, dict) and 'function' in tool_call:
-                            # Ensure function.arguments is a string
-                            if 'arguments' in tool_call['function'] and not isinstance(tool_call['function']['arguments'], str):
-                                tool_call['function']['arguments'] = json.dumps(tool_call['function']['arguments'])
+                    content = item['content']
+                    content['message_id'] = item['message_id']
+                    messages.append(content)
 
             return messages
 
@@ -204,15 +242,18 @@ class ThreadManager:
         # Log model info
         logger.info(f"🤖 Thread {thread_id}: Using model {llm_model}")
 
+        # Ensure processor_config is not None
+        config = processor_config or ProcessorConfig()
+
         # Apply max_xml_tool_calls if specified and not already set in config
-        if max_xml_tool_calls > 0 and not processor_config.max_xml_tool_calls:
-            processor_config.max_xml_tool_calls = max_xml_tool_calls
+        if max_xml_tool_calls > 0 and not config.max_xml_tool_calls:
+            config.max_xml_tool_calls = max_xml_tool_calls
 
         # Create a working copy of the system prompt to potentially modify
         working_system_prompt = system_prompt.copy()
 
         # Add XML examples to system prompt if requested, do this only ONCE before the loop
-        if include_xml_examples and processor_config.xml_tool_calling:
+        if include_xml_examples and config.xml_tool_calling:
             xml_examples = self.tool_registry.get_xml_examples()
             if xml_examples:
                 examples_content = """
@@ -256,13 +297,19 @@ Here are the XML tools available with examples:
         # Control whether we need to auto-continue due to tool_calls finish reason
         auto_continue = True
         auto_continue_count = 0
+        
+        # Shared state for continuous streaming across auto-continues
+        continuous_state = {
+            'accumulated_content': '',
+            'thread_run_id': None
+        }
 
         # Define inner function to handle a single run
         async def _run_once(temp_msg=None):
             try:
-                # Ensure processor_config is available in this scope
-                nonlocal processor_config
-                # Note: processor_config is now guaranteed to exist due to check above
+                # Ensure config is available in this scope
+                nonlocal config
+                # Note: config is now guaranteed to exist due to check above
 
                 # 1. Get messages from thread for LLM call
                 messages = await self.get_llm_messages(thread_id)
@@ -270,30 +317,10 @@ Here are the XML tools available with examples:
                 # 2. Check token count before proceeding
                 token_count = 0
                 try:
-                    from litellm import token_counter
                     # Use the potentially modified working_system_prompt for token counting
                     token_count = token_counter(model=llm_model, messages=[working_system_prompt] + messages)
                     token_threshold = self.context_manager.token_threshold
                     logger.info(f"Thread {thread_id} token count: {token_count}/{token_threshold} ({(token_count/token_threshold)*100:.1f}%)")
-
-                    # if token_count >= token_threshold and enable_context_manager:
-                    #     logger.info(f"Thread token count ({token_count}) exceeds threshold ({token_threshold}), summarizing...")
-                    #     summarized = await self.context_manager.check_and_summarize_if_needed(
-                    #         thread_id=thread_id,
-                    #         add_message_callback=self.add_message,
-                    #         model=llm_model,
-                    #         force=True
-                    #     )
-                    #     if summarized:
-                    #         logger.info("Summarization complete, fetching updated messages with summary")
-                    #         messages = await self.get_llm_messages(thread_id)
-                    #         # Recount tokens after summarization, using the modified prompt
-                    #         new_token_count = token_counter(model=llm_model, messages=[working_system_prompt] + messages)
-                    #         logger.info(f"After summarization: token count reduced from {token_count} to {new_token_count}")
-                    #     else:
-                    #         logger.warning("Summarization failed or wasn't needed - proceeding with original messages")
-                    # elif not enable_context_manager:
-                    #     logger.info("Automatic summarization disabled. Skipping token count check and summarization.")
 
                 except Exception as e:
                     logger.error(f"Error counting tokens or summarizing: {str(e)}")
@@ -321,11 +348,25 @@ Here are the XML tools available with examples:
                         prepared_messages.append(temp_msg)
                         logger.debug("Added temporary message to the end of prepared messages")
 
+                # Add partial assistant content for auto-continue context (without saving to DB)
+                if auto_continue_count > 0 and continuous_state.get('accumulated_content'):
+                    partial_content = continuous_state.get('accumulated_content', '')
+                    
+                    # Create temporary assistant message with just the text content
+                    temporary_assistant_message = {
+                        "role": "assistant",
+                        "content": partial_content
+                    }
+                    prepared_messages.append(temporary_assistant_message)
+                    logger.info(f"Added temporary assistant message with {len(partial_content)} chars for auto-continue context")
+
                 # 4. Prepare tools for LLM call
                 openapi_tool_schemas = None
-                if processor_config.native_tool_calling:
+                if config.native_tool_calling:
                     openapi_tool_schemas = self.tool_registry.get_openapi_schemas()
                     logger.debug(f"Retrieved {len(openapi_tool_schemas) if openapi_tool_schemas else 0} OpenAPI tool schemas")
+
+                prepared_messages = self.context_manager.compress_messages(prepared_messages, llm_model)
 
                 # 5. Make LLM API call
                 logger.debug("Making LLM API call")
@@ -350,7 +391,7 @@ Here are the XML tools available with examples:
                         temperature=llm_temperature,
                         max_tokens=llm_max_tokens,
                         tools=openapi_tool_schemas,
-                        tool_choice=tool_choice if processor_config.native_tool_calling else None,
+                        tool_choice=tool_choice if config.native_tool_calling else "none",
                         stream=stream,
                         enable_thinking=enable_thinking,
                         reasoning_effort=reasoning_effort
@@ -364,13 +405,27 @@ Here are the XML tools available with examples:
                 # 6. Process LLM response using the ResponseProcessor
                 if stream:
                     logger.debug("Processing streaming response")
-                    response_generator = self.response_processor.process_streaming_response(
-                        llm_response=llm_response,
-                        thread_id=thread_id,
-                        config=processor_config,
-                        prompt_messages=prepared_messages,
-                        llm_model=llm_model,
-                    )
+                    # Ensure we have an async generator for streaming
+                    if hasattr(llm_response, '__aiter__'):
+                        response_generator = self.response_processor.process_streaming_response(
+                            llm_response=cast(AsyncGenerator, llm_response),
+                            thread_id=thread_id,
+                            config=config,
+                            prompt_messages=prepared_messages,
+                            llm_model=llm_model,
+                            can_auto_continue=(native_max_auto_continues > 0),
+                            auto_continue_count=auto_continue_count,
+                            continuous_state=continuous_state
+                        )
+                    else:
+                        # Fallback to non-streaming if response is not iterable
+                        response_generator = self.response_processor.process_non_streaming_response(
+                            llm_response=llm_response,
+                            thread_id=thread_id,
+                            config=config,
+                            prompt_messages=prepared_messages,
+                            llm_model=llm_model,
+                        )
 
                     return response_generator
                 else:
@@ -379,7 +434,7 @@ Here are the XML tools available with examples:
                     response_generator = self.response_processor.process_non_streaming_response(
                         llm_response=llm_response,
                         thread_id=thread_id,
-                        config=processor_config,
+                        config=config,
                         prompt_messages=prepared_messages,
                         llm_model=llm_model,
                     )
@@ -389,6 +444,7 @@ Here are the XML tools available with examples:
                 logger.error(f"Error in run_thread: {str(e)}", exc_info=True)
                 # Return the error as a dict to be handled by the caller
                 return {
+                    "type": "status",
                     "status": "error",
                     "message": str(e)
                 }
@@ -414,37 +470,58 @@ Here are the XML tools available with examples:
 
                     # Process each chunk
                     try:
-                        async for chunk in response_gen:
-                            # Check if this is a finish reason chunk with tool_calls or xml_tool_limit_reached
-                            if chunk.get('type') == 'finish':
-                                if chunk.get('finish_reason') == 'tool_calls':
-                                    # Only auto-continue if enabled (max > 0)
-                                    if native_max_auto_continues > 0:
-                                        logger.info(f"Detected finish_reason='tool_calls', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
+                        if hasattr(response_gen, '__aiter__'):
+                            async for chunk in cast(AsyncGenerator, response_gen):
+                                # Check if this is a finish reason chunk with tool_calls or xml_tool_limit_reached
+                                if chunk.get('type') == 'finish':
+                                    if chunk.get('finish_reason') == 'tool_calls':
+                                        # Only auto-continue if enabled (max > 0)
+                                        if native_max_auto_continues > 0:
+                                            logger.info(f"Detected finish_reason='tool_calls', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
+                                            auto_continue = True
+                                            auto_continue_count += 1
+                                            # Don't yield the finish chunk to avoid confusing the client
+                                            continue
+                                    elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
+                                        # Don't auto-continue if XML tool limit was reached
+                                        logger.info(f"Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
+                                        auto_continue = False
+                                        # Still yield the chunk to inform the client
+
+                                elif chunk.get('type') == 'status':
+                                    # if the finish reason is length, auto-continue
+                                    content = json.loads(chunk.get('content'))
+                                    if content.get('finish_reason') == 'length':
+                                        logger.info(f"Detected finish_reason='length', auto-continuing ({auto_continue_count + 1}/{native_max_auto_continues})")
                                         auto_continue = True
                                         auto_continue_count += 1
-                                        # Don't yield the finish chunk to avoid confusing the client
                                         continue
-                                elif chunk.get('finish_reason') == 'xml_tool_limit_reached':
-                                    # Don't auto-continue if XML tool limit was reached
-                                    logger.info(f"Detected finish_reason='xml_tool_limit_reached', stopping auto-continue")
-                                    auto_continue = False
-                                    # Still yield the chunk to inform the client
-
-                            # Otherwise just yield the chunk normally
-                            yield chunk
+                                # Otherwise just yield the chunk normally
+                                yield chunk
+                        else:
+                            # response_gen is not iterable (likely an error dict), yield it directly
+                            yield response_gen
 
                         # If not auto-continuing, we're done
                         if not auto_continue:
                             break
                     except Exception as e:
-                        # If there's an exception, log it, yield an error status, and stop execution
-                        logger.error(f"Error in auto_continue_wrapper generator: {str(e)}", exc_info=True)
-                        yield {
-                            "type": "status",
-                            "status": "error",
-                            "message": f"Error in thread processing: {str(e)}"
-                        }
+                        if ("AnthropicException - Overloaded" in str(e)):
+                            logger.error(f"AnthropicException - Overloaded detected - Falling back to OpenRouter: {str(e)}", exc_info=True)
+                            nonlocal llm_model
+                            # Remove "-20250514" from the model name if present
+                            model_name_cleaned = llm_model.replace("-20250514", "")
+                            llm_model = f"openrouter/{model_name_cleaned}"
+                            auto_continue = True
+                            continue # Continue the loop
+                        else:
+                            # If there's any other exception, log it, yield an error status, and stop execution
+                            logger.error(f"Error in auto_continue_wrapper generator: {str(e)}", exc_info=True)
+                            yield {
+                                "type": "status",
+                                "status": "error",
+                                "message": f"Error in thread processing: {str(e)}"
+                            }
                         return  # Exit the generator on any error
                 except Exception as outer_e:
                     # Catch exceptions from _run_once itself

@@ -5,6 +5,7 @@ import { Message as BaseApiMessageType } from '@/lib/api';
 // Define a type for the params to make React.use() work properly
 export type ThreadParams = {
   threadId: string;
+  projectId: string;
 };
 
 // Unified Message Interface matching the backend/database schema
@@ -18,6 +19,12 @@ export interface UnifiedMessage {
   metadata: string; // ALWAYS a JSON string from the backend
   created_at: string; // ISO timestamp string
   updated_at: string; // ISO timestamp string
+  agent_id?: string; // ID of the agent associated with this message
+  agents?: {
+    name: string;
+    avatar?: string;
+    avatar_color?: string;
+  }; // Agent information from join
 }
 
 // Helper type for parsed content - structure depends on message.type

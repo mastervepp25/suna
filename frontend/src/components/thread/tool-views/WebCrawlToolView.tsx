@@ -3,20 +3,11 @@ import {
   Globe,
   CheckCircle,
   AlertTriangle,
-  ExternalLink,
   Loader2,
   FileText,
-  Clock,
   Copy,
-  Download,
-  Folder,
-  ChevronRight,
-  Server,
-  Calendar,
   Check,
   ArrowUpRight,
-  Zap,
-  Eye,
   BookOpen
 } from 'lucide-react';
 import { ToolViewProps } from './types';
@@ -25,8 +16,9 @@ import {
   extractWebpageContent,
   formatTimestamp,
   getToolTitle,
+  extractToolData,
 } from './utils';
-import { cn } from '@/lib/utils';
+import { cn, truncateString } from '@/lib/utils';
 import { useTheme } from 'next-themes';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -34,10 +26,6 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-
-function truncateText(text: string, maxLength: number = 40) {
-  return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
-}
 
 export function WebCrawlToolView({
   name = 'crawl-webpage',
@@ -49,11 +37,27 @@ export function WebCrawlToolView({
   isStreaming = false,
 }: ToolViewProps) {
   const { resolvedTheme } = useTheme();
-  const isDarkTheme = resolvedTheme === 'dark';
   const [progress, setProgress] = useState(0);
   const [copiedContent, setCopiedContent] = useState(false);
 
-  const url = extractCrawlUrl(assistantContent);
+  // Try to extract data using the new parser first
+  const assistantToolData = extractToolData(assistantContent);
+  const toolToolData = extractToolData(toolContent);
+
+  let url: string | null = null;
+
+  // Use data from the new format if available
+  if (assistantToolData.toolResult) {
+    url = assistantToolData.url;
+  } else if (toolToolData.toolResult) {
+    url = toolToolData.url;
+  }
+
+  // If not found in new format, fall back to legacy extraction
+  if (!url) {
+    url = extractCrawlUrl(assistantContent);
+  }
+
   const webpageContent = extractWebpageContent(toolContent);
   const toolTitle = getToolTitle(name);
 
@@ -101,7 +105,7 @@ export function WebCrawlToolView({
 
   const copyContent = async () => {
     if (!webpageContent?.text) return;
-    
+
     try {
       await navigator.clipboard.writeText(webpageContent.text);
       setCopiedContent(true);
@@ -115,34 +119,34 @@ export function WebCrawlToolView({
     const wordCount = content.trim().split(/\s+/).length;
     const charCount = content.length;
     const lineCount = content.split('\n').length;
-    
+
     return { wordCount, charCount, lineCount };
   };
 
   const contentStats = webpageContent?.text ? getContentStats(webpageContent.text) : null;
 
   return (
-    <Card className="gap-0 flex border shadow-none border-t border-b-0 border-x-0 p-0 rounded-none flex-col h-full overflow-hidden bg-white dark:bg-zinc-950">
+    <Card className="gap-0 flex border shadow-none border-t border-b-0 border-x-0 p-0 rounded-none flex-col h-full overflow-hidden bg-card">
       <CardHeader className="h-14 bg-zinc-50/80 dark:bg-zinc-900/80 backdrop-blur-sm border-b p-2 px-4 space-y-2">
         <div className="flex flex-row items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="relative p-2 rounded-lg bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20">
               <Globe className="w-5 h-5 text-primary" />
             </div>
-            
+
             <div>
               <CardTitle className="text-base font-medium text-zinc-900 dark:text-zinc-100">
                 {toolTitle}
               </CardTitle>
             </div>
           </div>
-          
+
           {!isStreaming && (
-            <Badge 
+            <Badge
               variant="secondary"
               className={
-                isSuccess 
-                  ? "bg-gradient-to-b from-emerald-200 to-emerald-100 text-emerald-700 dark:from-emerald-800/50 dark:to-emerald-900/60 dark:text-emerald-300" 
+                isSuccess
+                  ? "bg-gradient-to-b from-emerald-200 to-emerald-100 text-emerald-700 dark:from-emerald-800/50 dark:to-emerald-900/60 dark:text-emerald-300"
                   : "bg-gradient-to-b from-rose-200 to-rose-100 text-rose-700 dark:from-rose-800/50 dark:to-rose-900/60 dark:text-rose-300"
               }
             >
@@ -170,7 +174,7 @@ export function WebCrawlToolView({
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
                 Fetching content from <span className="font-mono text-xs break-all">{domain}</span>
               </p>
-              <Progress value={progress} className="w-full h-2" />
+              <Progress value={progress} className="w-full h-1" />
               <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-2">{progress}% complete</p>
             </div>
           </div>
@@ -187,21 +191,21 @@ export function WebCrawlToolView({
                 <div className="group relative">
                   <div className="flex items-center gap-3 p-4 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors rounded-xl border border-zinc-200 dark:border-zinc-800">
                     {favicon && (
-                      <img 
-                        src={favicon} 
-                        alt="" 
+                      <img
+                        src={favicon}
+                        alt=""
                         className="w-6 h-6 rounded-md flex-shrink-0"
                         onError={(e) => {
                           (e.target as HTMLImageElement).style.display = 'none';
-                        }} 
+                        }}
                       />
                     )}
                     <div className="flex-1 min-w-0">
-                      <p className="font-mono text-sm text-zinc-900 dark:text-zinc-100 truncate">{truncateText(url)}</p>
+                      <p className="font-mono text-sm text-zinc-900 dark:text-zinc-100 truncate">{truncateString(url, 70)}</p>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{domain}</p>
                     </div>
-                    <Button 
-                      variant="ghost" 
+                    <Button
+                      variant="ghost"
                       size="sm"
                       className="opacity-70 group-hover:opacity-100 transition-opacity"
                       asChild
@@ -252,7 +256,7 @@ export function WebCrawlToolView({
                           )}
                         </div>
                       </div>
-                      
+
                       <div className="flex items-center gap-1">
                         <TooltipProvider>
                           <Tooltip>
@@ -318,7 +322,7 @@ export function WebCrawlToolView({
           </div>
         )}
       </CardContent>
-      
+
       {/* Footer */}
       <div className="px-4 py-2 h-10 bg-gradient-to-r from-zinc-50/90 to-zinc-100/90 dark:from-zinc-900/90 dark:to-zinc-800/90 backdrop-blur-sm border-t border-zinc-200 dark:border-zinc-800 flex justify-between items-center gap-4">
         <div className="h-full flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
@@ -329,7 +333,7 @@ export function WebCrawlToolView({
             </Badge>
           )}
         </div>
-        
+
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
           {toolTimestamp && !isStreaming
             ? formatTimestamp(toolTimestamp)

@@ -1,21 +1,28 @@
-import React, { forwardRef, useEffect } from 'react';
+import React, { forwardRef, useEffect, useState } from 'react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Square, Loader2, ArrowUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { UploadedFile } from './chat-input';
 import { FileUploadHandler } from './file-upload-handler';
+import { VoiceRecorder } from './voice-recorder';
 import { ModelSelector } from './model-selector';
-import { SubscriptionStatus } from './_use-model-selection';
+import { AgentSelector } from './agent-selector';
+import { canAccessModel, SubscriptionStatus } from './_use-model-selection';
 import { isLocalMode } from '@/lib/config';
+import { useFeatureFlag } from '@/lib/feature-flags';
 import { TooltipContent } from '@/components/ui/tooltip';
 import { Tooltip } from '@/components/ui/tooltip';
 import { TooltipProvider, TooltipTrigger } from '@radix-ui/react-tooltip';
+import { BillingModal } from '@/components/billing/billing-modal';
+import ChatDropdown from './chat-dropdown';
+import { handleFiles } from './file-upload-handler';
 
 interface MessageInputProps {
   value: string;
   onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onSubmit: (e: React.FormEvent) => void;
+  onTranscription: (text: string) => void;
   placeholder: string;
   loading: boolean;
   disabled: boolean;
@@ -31,6 +38,8 @@ interface MessageInputProps {
   setUploadedFiles: React.Dispatch<React.SetStateAction<UploadedFile[]>>;
   setIsUploading: React.Dispatch<React.SetStateAction<boolean>>;
   hideAttachments?: boolean;
+  messages?: any[]; // Add messages prop
+  isLoggedIn?: boolean;
 
   selectedModel: string;
   onModelChange: (model: string) => void;
@@ -38,6 +47,11 @@ interface MessageInputProps {
   subscriptionStatus: SubscriptionStatus;
   canAccessModel: (modelId: string) => boolean;
   refreshCustomModels?: () => void;
+  selectedAgentId?: string;
+  onAgentSelect?: (agentId: string | undefined) => void;
+  enableAdvancedConfig?: boolean;
+  hideAgentSelection?: boolean;
+  isSunaAgent?: boolean;
 }
 
 export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
@@ -46,6 +60,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       value,
       onChange,
       onSubmit,
+      onTranscription,
       placeholder,
       loading,
       disabled,
@@ -61,6 +76,8 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       setUploadedFiles,
       setIsUploading,
       hideAttachments = false,
+      messages = [],
+      isLoggedIn = true,
 
       selectedModel,
       onModelChange,
@@ -68,9 +85,18 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       subscriptionStatus,
       canAccessModel,
       refreshCustomModels,
+
+      selectedAgentId,
+      onAgentSelect,
+      enableAdvancedConfig = false,
+      hideAgentSelection = false,
+      isSunaAgent,
     },
     ref,
   ) => {
+    const [billingModalOpen, setBillingModalOpen] = useState(false);
+    const { enabled: customAgentsEnabled, loading: flagsLoading } = useFeatureFlag('custom_agents');
+
     useEffect(() => {
       const textarea = ref as React.RefObject<HTMLTextAreaElement>;
       if (!textarea.current) return;
@@ -94,7 +120,7 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
     }, [value, ref]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         if (
           (value.trim() || uploadedFiles.length > 0) &&
@@ -106,25 +132,81 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
       }
     };
 
+    const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!e.clipboardData) return;
+      const items = Array.from(e.clipboardData.items);
+      const imageFiles: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        handleFiles(
+          imageFiles,
+          sandboxId,
+          setPendingFiles,
+          setUploadedFiles,
+          setIsUploading,
+          messages,
+        );
+      }
+    };
+
+    const renderDropdown = () => {
+      if (isLoggedIn) {
+        const showAdvancedFeatures = enableAdvancedConfig || (customAgentsEnabled && !flagsLoading);
+
+        return (
+          <div className="flex items-center gap-2">
+            {showAdvancedFeatures && !hideAgentSelection && (
+              <AgentSelector
+                selectedAgentId={selectedAgentId}
+                onAgentSelect={onAgentSelect}
+                disabled={loading || (disabled && !isAgentRunning)}
+                isSunaAgent={isSunaAgent}
+              />
+            )}
+            <ModelSelector
+              selectedModel={selectedModel}
+              onModelChange={onModelChange}
+              modelOptions={modelOptions}
+              subscriptionStatus={subscriptionStatus}
+              canAccessModel={canAccessModel}
+              refreshCustomModels={refreshCustomModels}
+              billingModalOpen={billingModalOpen}
+              setBillingModalOpen={setBillingModalOpen}
+            />
+          </div>
+        );
+      }
+      return <ChatDropdown />;
+    }
+
     return (
-      <div className="flex flex-col w-full h-auto gap-4 justify-between">
-        <div className="flex gap-2 items-center px-2">
+      <div className="relative flex flex-col w-full h-full gap-2 justify-between">
+
+        <div className="flex flex-col gap-1 px-2">
           <Textarea
             ref={ref}
             value={value}
             onChange={onChange}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder={placeholder}
             className={cn(
-              'w-full bg-transparent dark:bg-transparent border-none shadow-none focus-visible:ring-0 px-2 py-1 text-base min-h-[40px] max-h-[200px] overflow-y-auto resize-none',
+              'w-full bg-transparent dark:bg-transparent border-none shadow-none focus-visible:ring-0 px-0.5 pb-6 pt-4 !text-[15px] min-h-[36px] max-h-[200px] overflow-y-auto resize-none',
               isDraggingOver ? 'opacity-40' : '',
             )}
             disabled={loading || (disabled && !isAgentRunning)}
-            rows={2}
+            rows={1}
           />
         </div>
 
-        <div className="flex items-center justify-between mt-1 ml-3 mb-1 pr-2">
+
+        <div className="flex items-center justify-between mt-0 mb-1 px-2">
           <div className="flex items-center gap-3">
             {!hideAttachments && (
               <FileUploadHandler
@@ -137,44 +219,45 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
                 setPendingFiles={setPendingFiles}
                 setUploadedFiles={setUploadedFiles}
                 setIsUploading={setIsUploading}
+                messages={messages}
+                isLoggedIn={isLoggedIn}
               />
             )}
 
-
           </div>
-          {subscriptionStatus === 'no_subscription' && !isLocalMode() &&
+
+          {/* {subscriptionStatus === 'no_subscription' && !isLocalMode() &&
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger>
-                  <p className='text-sm text-amber-500 hidden sm:block'>Upgrade for full performance</p>
-                  <div className='sm:hidden absolute bottom-0 left-0 right-0 flex justify-center'>
-                    <p className='text-xs text-amber-500 bg-background/80 backdrop-blur-sm px-2 py-1 rounded-md shadow-sm'>
-                      Upgrade for better performance
-                    </p>
-                  </div>
+                  <p role='button' className='text-sm text-amber-500 hidden sm:block cursor-pointer' onClick={() => setBillingModalOpen(true)}>Upgrade for more usage</p>
                 </TooltipTrigger>
                 <TooltipContent>
-                  <p>The free tier is severely limited by inferior models; upgrade to experience the true full Suna experience.</p>
+                  <p>The free tier is severely limited by the amount of usage. Upgrade to experience the full power of Suna.</p>
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
-          }
+          } */}
+
           <div className='flex items-center gap-2'>
-            <ModelSelector
-              selectedModel={selectedModel}
-              onModelChange={onModelChange}
-              modelOptions={modelOptions}
-              subscriptionStatus={subscriptionStatus}
-              canAccessModel={canAccessModel}
-              refreshCustomModels={refreshCustomModels}
+            {renderDropdown()}
+            <BillingModal
+              open={billingModalOpen}
+              onOpenChange={setBillingModalOpen}
+              returnUrl={typeof window !== 'undefined' ? window.location.href : '/'}
             />
+
+            {isLoggedIn && <VoiceRecorder
+              onTranscription={onTranscription}
+              disabled={loading || (disabled && !isAgentRunning)}
+            />}
+
             <Button
               type="submit"
               onClick={isAgentRunning && onStopAgent ? onStopAgent : onSubmit}
               size="sm"
               className={cn(
-                'w-7 h-7 flex-shrink-0 self-end',
-                isAgentRunning ? 'bg-red-500 hover:bg-red-600' : '',
+                'w-8 h-8 flex-shrink-0 self-end rounded-xl',
                 (!value.trim() && uploadedFiles.length === 0 && !isAgentRunning) ||
                   loading ||
                   (disabled && !isAgentRunning)
@@ -188,15 +271,22 @@ export const MessageInput = forwardRef<HTMLTextAreaElement, MessageInputProps>(
               }
             >
               {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-5 w-5 animate-spin" />
               ) : isAgentRunning ? (
-                <Square className="h-4 w-4" />
+                <div className="min-h-[14px] min-w-[14px] w-[14px] h-[14px] rounded-sm bg-current" />
               ) : (
-                <ArrowUp className="h-4 w-4" />
+                <ArrowUp className="h-5 w-5" />
               )}
             </Button>
           </div>
         </div>
+        {/* {subscriptionStatus === 'no_subscription' && !isLocalMode() &&
+          <div className='sm:hidden absolute -bottom-8 left-0 right-0 flex justify-center'>
+            <p className='text-xs text-amber-500 px-2 py-1'>
+              Upgrade for better performance
+            </p>
+          </div>
+        } */}
       </div>
     );
   },

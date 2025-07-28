@@ -1,17 +1,15 @@
 import React from 'react';
-import Image from 'next/image';
 import {
-    FileText, FileImage, FileCode, FilePlus, FileSpreadsheet, FileVideo,
+    FileText, FileImage, FileCode, FileSpreadsheet, FileVideo,
     FileAudio, FileType, Database, Archive, File, ExternalLink,
-    Download, Loader2
+    Loader2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { AttachmentGroup } from './attachment-group';
 import { HtmlRenderer } from './preview-renderers/html-renderer';
 import { MarkdownRenderer } from './preview-renderers/markdown-renderer';
 import { CsvRenderer } from './preview-renderers/csv-renderer';
-import { useFileContent } from '@/hooks/use-file-content';
-import { useImageContent } from '@/hooks/use-image-content';
+import { useFileContent, useImageContent } from '@/hooks/react-query/files';
 import { useAuth } from '@/components/AuthProvider';
 import { Project } from '@/lib/api';
 
@@ -160,8 +158,9 @@ interface FileAttachmentProps {
 }
 
 // Cache fetched content between mounts to avoid duplicate fetches
-const contentCache = new Map<string, string>();
-const errorCache = new Set<string>();
+// Content caches for file attachment optimization
+// const contentCache = new Map<string, string>();
+// const errorCache = new Set<string>();
 
 export function FileAttachment({
     filepath,
@@ -235,7 +234,7 @@ export function FileAttachment({
     if (isImage && showPreview) {
         // Use custom height for images if provided through CSS variable
         const imageHeight = isGridLayout
-            ? customStyle['--attachment-height'] as string
+            ? (customStyle as any)['--attachment-height'] as string
             : '54px';
 
         // Show loading state for images
@@ -249,7 +248,7 @@ export function FileAttachment({
                         "bg-black/5 dark:bg-black/20",
                         "p-0 overflow-hidden",
                         "flex items-center justify-center",
-                        isGridLayout ? "w-full" : "inline-block",
+                        isGridLayout ? "w-full" : "min-w-[54px]",
                         className
                     )}
                     style={{
@@ -295,7 +294,7 @@ export function FileAttachment({
             <button
                 onClick={handleClick}
                 className={cn(
-                    "group relative min-h-[54px] rounded-xl cursor-pointer",
+                    "group relative min-h-[54px] rounded-2xl cursor-pointer",
                     "border border-black/10 dark:border-white/10",
                     "bg-black/5 dark:bg-black/20",
                     "p-0 overflow-hidden", // No padding, content touches borders
@@ -311,7 +310,7 @@ export function FileAttachment({
                 title={filename}
             >
                 <img
-                    src={sandboxId && session?.access_token ? imageUrl : fileUrl}
+                    src={sandboxId && session?.access_token ? imageUrl : (fileUrl || '')}
                     alt={filename}
                     className={cn(
                         "max-h-full", // Respect parent height constraint
@@ -331,7 +330,26 @@ export function FileAttachment({
 
                         // Only log details in dev environments to avoid console spam
                         if (process.env.NODE_ENV === 'development') {
-                            console.error('Image URL:', sandboxId && session?.access_token ? imageUrl : fileUrl);
+                            const imgSrc = sandboxId && session?.access_token ? imageUrl : fileUrl;
+                            console.error('Image URL:', imgSrc);
+
+                            // Additional debugging for blob URLs
+                            if (typeof imgSrc === 'string' && imgSrc.startsWith('blob:')) {
+                                console.error('Blob URL failed to load. This could indicate:');
+                                console.error('- Blob URL was revoked prematurely');
+                                console.error('- Blob data is corrupted or invalid');
+                                console.error('- MIME type mismatch');
+
+                                // Try to check if the blob URL is still valid
+                                fetch(imgSrc, { method: 'HEAD' })
+                                    .then(response => {
+                                        console.error(`Blob URL HEAD request status: ${response.status}`);
+                                        console.error(`Blob URL content type: ${response.headers.get('content-type')}`);
+                                    })
+                                    .catch(err => {
+                                        console.error('Blob URL HEAD request failed:', err.message);
+                                    });
+                            }
 
                             // Check if the error is potentially due to authentication
                             if (sandboxId && (!session || !session.access_token)) {
@@ -369,8 +387,8 @@ export function FileAttachment({
             <div
                 className={cn(
                     "group relative rounded-xl w-full",
-                    "border border-black/10 dark:border-white/10",
-                    "bg-black/5 dark:bg-black/20",
+                    "border",
+                    "bg-card",
                     "overflow-hidden",
                     "h-[300px]", // Fixed height for previews
                     "pt-10", // Room for header
@@ -444,7 +462,7 @@ export function FileAttachment({
                 </div>
 
                 {/* Header with filename */}
-                <div className="absolute top-0 left-0 right-0 bg-black/5 dark:bg-white/5 p-2 z-10 flex items-center justify-between">
+                <div className="absolute top-0 left-0 right-0 bg-accent p-2 z-10 flex items-center justify-between">
                     <div className="text-sm font-medium truncate">{filename}</div>
                     {onClick && (
                         <button
@@ -462,7 +480,7 @@ export function FileAttachment({
     // Regular files with details
     const safeStyle = { ...customStyle };
     delete safeStyle.height;
-    delete safeStyle['--attachment-height'];
+    delete (safeStyle as any)['--attachment-height'];
 
     return (
         <button
@@ -503,7 +521,7 @@ export function FileAttachment({
 
 interface FileAttachmentGridProps {
     attachments: string[];
-    onFileClick?: (path: string) => void;
+    onFileClick?: (path: string, filePathList?: string[]) => void;
     className?: string;
     sandboxId?: string;
     showPreviews?: boolean;
