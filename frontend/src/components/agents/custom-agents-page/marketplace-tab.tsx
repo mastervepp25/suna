@@ -47,10 +47,10 @@ export const MarketplaceTab = ({
           <SelectTrigger className="w-[180px] h-12 rounded-xl">
             <SelectValue placeholder="Filter agents" />
           </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Agents</SelectItem>
-            <SelectItem value="kortix">Kortix Verified</SelectItem>
-            <SelectItem value="community">Community</SelectItem>
+          <SelectContent className='rounded-xl'>
+            <SelectItem className='rounded-xl' value="all">All Agents</SelectItem>
+            <SelectItem className='rounded-xl' value="kortix">Kortix Verified</SelectItem>
+            <SelectItem className='rounded-xl' value="community">Community</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -90,7 +90,7 @@ export const MarketplaceTab = ({
                       title="Verified by Kortix"
                       subtitle="Official agents, maintained and supported"
                     />
-                    <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                       {kortixTeamItems.map((item) => (
                         <AgentCard
                           key={item.id}
@@ -107,7 +107,7 @@ export const MarketplaceTab = ({
                 )}
                 {communityItems.length > 0 && (
                   <div className="space-y-6">
-                    <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                       {communityItems.map((item) => (
                         <AgentCard
                           key={item.id}
@@ -124,7 +124,7 @@ export const MarketplaceTab = ({
                 )}
               </>
             ) : (
-              <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {allMarketplaceItems.map((item) => (
                   <AgentCard
                     key={item.id}

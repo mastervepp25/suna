@@ -1,9 +1,9 @@
 import json
 from typing import Optional, List
-from agentpress.tool import ToolResult, openapi_schema, xml_schema
+from agentpress.tool import ToolResult, openapi_schema, usage_example
 from agentpress.thread_manager import ThreadManager
 from .base_tool import AgentBuilderBaseTool
-from pipedream.facade import PipedreamManager
+from pipedream import profile_service, connection_service, app_service, mcp_service, connection_token_service
 from .mcp_search_tool import MCPSearchTool
 from utils.logger import logger
 
@@ -11,7 +11,6 @@ from utils.logger import logger
 class CredentialProfileTool(AgentBuilderBaseTool):
     def __init__(self, thread_manager: ThreadManager, db_connection, agent_id: str):
         super().__init__(thread_manager, db_connection, agent_id)
-        self.pipedream_manager = PipedreamManager()
         self.pipedream_search = MCPSearchTool(thread_manager, db_connection, agent_id)
 
     @openapi_schema({
@@ -31,23 +30,18 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="get-credential-profiles",
-        mappings=[
-            {"param_name": "app_slug", "node_type": "attribute", "path": ".", "required": False}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="get_credential_profiles">
         <parameter name="app_slug">github</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def get_credential_profiles(self, app_slug: Optional[str] = None) -> ToolResult:
         try:
+            from uuid import UUID
             account_id = await self._get_current_account_id()
-            profiles = await self.pipedream_manager.get_profiles(account_id, app_slug)
+            profiles = await profile_service.get_profiles(UUID(account_id), app_slug)
             
             formatted_profiles = []
             for profile in profiles:
@@ -100,14 +94,7 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="create-credential-profile",
-        mappings=[
-            {"param_name": "app_slug", "node_type": "attribute", "path": ".", "required": True},
-            {"param_name": "profile_name", "node_type": "attribute", "path": ".", "required": True},
-            {"param_name": "display_name", "node_type": "attribute", "path": ".", "required": False}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="create_credential_profile">
         <parameter name="app_slug">github</parameter>
@@ -115,8 +102,7 @@ class CredentialProfileTool(AgentBuilderBaseTool):
         <parameter name="display_name">My Personal GitHub Account</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def create_credential_profile(
         self,
         app_slug: str,
@@ -124,14 +110,15 @@ class CredentialProfileTool(AgentBuilderBaseTool):
         display_name: Optional[str] = None
     ) -> ToolResult:
         try:
+            from uuid import UUID
             account_id = await self._get_current_account_id()
             # fetch app domain object directly
-            app_obj = await self.pipedream_manager.get_app_by_slug(app_slug)
+            app_obj = await app_service.get_app_by_slug(app_slug)
             if not app_obj:
                 return self.fail_response(f"Could not find app for slug '{app_slug}'")
             # create credential profile using the app name
-            profile = await self.pipedream_manager.create_profile(
-                account_id=account_id,
+            profile = await profile_service.create_profile(
+                account_id=UUID(account_id),
                 profile_name=profile_name,
                 app_slug=app_slug,
                 app_name=app_obj.name,
@@ -173,32 +160,27 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="connect-credential-profile",
-        mappings=[
-            {"param_name": "profile_id", "node_type": "attribute", "path": ".", "required": True}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="connect_credential_profile">
         <parameter name="profile_id">profile-uuid-123</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def connect_credential_profile(self, profile_id: str) -> ToolResult:
         try:
+            from uuid import UUID
+            from pipedream.connection_token_service import ExternalUserId, AppSlug
             account_id = await self._get_current_account_id()
             
-            profile = await self.pipedream_manager.get_profile(account_id, profile_id)
+            profile = await profile_service.get_profile(UUID(account_id), UUID(profile_id))
             if not profile:
                 return self.fail_response("Credential profile not found")
             
             # generate connection token using primitive values
-            connection_result = await self.pipedream_manager.create_connection_token(
-                profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id),
-                profile.app_slug.value if hasattr(profile.app_slug, 'value') else str(profile.app_slug)
-            )
+            external_user_id = ExternalUserId(profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id))
+            app_slug = AppSlug(profile.app_slug.value if hasattr(profile.app_slug, 'value') else str(profile.app_slug))
+            connection_result = await connection_token_service.create(external_user_id, app_slug)
             
             return self.success_response({
                 "message": f"Generated connection link for '{profile.display_name}'",
@@ -230,31 +212,26 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="check-profile-connection",
-        mappings=[
-            {"param_name": "profile_id", "node_type": "attribute", "path": ".", "required": True}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="check_profile_connection">
         <parameter name="profile_id">profile-uuid-123</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def check_profile_connection(self, profile_id: str) -> ToolResult:
         try:
+            from uuid import UUID
+            from pipedream.connection_service import ExternalUserId
             account_id = await self._get_current_account_id()
             
-            profile = await self.pipedream_manager.get_profile(account_id, profile_id)
+            profile = await profile_service.get_profile(UUID(account_id), UUID(profile_id))
             if not profile:
                 return self.fail_response("Credential profile not found")
             
             # fetch and serialize connection objects
-            raw_connections = await self.pipedream_manager.get_connections(
-                profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id)
-            )
+            external_user_id = ExternalUserId(profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id))
+            raw_connections = await connection_service.get_connections_for_user(external_user_id)
             connections = []
             for conn in raw_connections:
                 connections.append({
@@ -278,13 +255,10 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             
             if profile.is_connected and connections:
                 try:
-                    # directly discover MCP servers via the facade
-                    from pipedream.domain.entities import ConnectionStatus
-                    servers = await self.pipedream_manager.discover_mcp_servers(
-                        external_user_id=profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id),
-                        app_slug=profile.app_slug.value if hasattr(profile.app_slug, 'value') else str(profile.app_slug)
-                    )
-                    # filter connected servers
+                    from pipedream.mcp_service import ConnectionStatus, ExternalUserId, AppSlug
+                    external_user_id = ExternalUserId(profile.external_user_id.value if hasattr(profile.external_user_id, 'value') else str(profile.external_user_id))
+                    app_slug = AppSlug(profile.app_slug.value if hasattr(profile.app_slug, 'value') else str(profile.app_slug))
+                    servers = await mcp_service.discover_servers_for_user(external_user_id, app_slug)
                     connected_servers = [s for s in servers if s.status == ConnectionStatus.CONNECTED]
                     if connected_servers:
                         tools = [t.name for t in connected_servers[0].available_tools]
@@ -330,14 +304,7 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="configure-profile-for-agent",
-        mappings=[
-            {"param_name": "profile_id", "node_type": "attribute", "path": ".", "required": True},
-            {"param_name": "enabled_tools", "node_type": "element", "path": "enabled_tools", "required": True},
-            {"param_name": "display_name", "node_type": "attribute", "path": ".", "required": False}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="configure_profile_for_agent">
         <parameter name="profile_id">profile-uuid-123</parameter>
@@ -345,8 +312,7 @@ class CredentialProfileTool(AgentBuilderBaseTool):
         <parameter name="display_name">Personal GitHub Integration</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def configure_profile_for_agent(
         self, 
         profile_id: str, 
@@ -354,33 +320,79 @@ class CredentialProfileTool(AgentBuilderBaseTool):
         display_name: Optional[str] = None
     ) -> ToolResult:
         try:
+            from uuid import UUID
             account_id = await self._get_current_account_id()
+            client = await self.db.client
 
-            profile = await self.pipedream_manager.get_profile(account_id, profile_id)
+            profile = await profile_service.get_profile(UUID(account_id), UUID(profile_id))
             if not profile:
                 return self.fail_response("Credential profile not found")
             if not profile.is_connected:
                 return self.fail_response("Profile is not connected yet. Please connect the profile first.")
 
-            result = await self.pipedream_manager.update_agent_profile_tools(
-                self.agent_id,
-                profile_id,
-                account_id,
-                enabled_tools
-            )
-            if not result.get("success", False):
-                return self.fail_response("Failed to update agent profile tools")
+            agent_result = await client.table('agents').select('current_version_id').eq('agent_id', self.agent_id).execute()
+            if not agent_result.data or not agent_result.data[0].get('current_version_id'):
+                return self.fail_response("Agent configuration not found")
 
-            version_msg = f"Profile '{profile.profile_name.value if hasattr(profile.profile_name, 'value') else str(profile.profile_name)}' updated with {len(enabled_tools)} tools"
+            version_result = await client.table('agent_versions')\
+                .select('config')\
+                .eq('version_id', agent_result.data[0]['current_version_id'])\
+                .maybe_single()\
+                .execute()
+            
+            if not version_result.data or not version_result.data.get('config'):
+                return self.fail_response("Agent version configuration not found")
+
+            current_config = version_result.data['config']
+            current_tools = current_config.get('tools', {})
+            current_custom_mcps = current_tools.get('custom_mcp', [])
+
+            app_slug = profile.app_slug.value if hasattr(profile.app_slug, 'value') else str(profile.app_slug)
+            
+            new_mcp_config = {
+                'name': display_name or profile.display_name,
+                'type': 'pipedream',
+                'config': {
+                    'url': 'https://remote.mcp.pipedream.net',
+                    'headers': {
+                        'x-pd-app-slug': app_slug
+                    },
+                    'profile_id': profile_id
+                },
+                'enabledTools': enabled_tools
+            }
+            
+            updated_mcps = [mcp for mcp in current_custom_mcps 
+                          if mcp.get('config', {}).get('profile_id') != profile_id]
+            
+            updated_mcps.append(new_mcp_config)
+            
+            current_tools['custom_mcp'] = updated_mcps
+            current_config['tools'] = current_tools
+            
+            from agent.versioning.version_service import get_version_service
+            version_service = await get_version_service()
+            new_version = await version_service.create_version(
+                agent_id=self.agent_id,
+                user_id=account_id,
+                system_prompt=current_config.get('system_prompt', ''),
+                configured_mcps=current_config.get('tools', {}).get('mcp', []),
+                custom_mcps=updated_mcps,
+                agentpress_tools=current_config.get('tools', {}).get('agentpress', {}),
+                change_description=f"Configured {display_name or profile.display_name} with {len(enabled_tools)} tools"
+            )
+
+            profile_name = profile.profile_name.value if hasattr(profile.profile_name, 'value') else str(profile.profile_name)
             return self.success_response({
-                "message": version_msg,
-                "enabled_tools": result.get("enabled_tools", []),
-                "total_tools": result.get("total_tools", 0),
-                "version_id": result.get("version_id"),
-                "version_name": result.get("version_name")
+                "message": f"Profile '{profile_name}' updated with {len(enabled_tools)} tools",
+                "enabled_tools": enabled_tools,
+                "total_tools": len(enabled_tools),
+                "version_id": new_version.version_id,
+                "version_name": new_version.version_name
             })
             
         except Exception as e:
+            logger.error(f"Error configuring profile for agent: {e}", exc_info=True)
             return self.fail_response(f"Error configuring profile for agent: {str(e)}")
 
     @openapi_schema({
@@ -400,45 +412,58 @@ class CredentialProfileTool(AgentBuilderBaseTool):
             }
         }
     })
-    @xml_schema(
-        tag_name="delete-credential-profile",
-        mappings=[
-            {"param_name": "profile_id", "node_type": "attribute", "path": ".", "required": True}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="delete_credential_profile">
         <parameter name="profile_id">profile-uuid-123</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def delete_credential_profile(self, profile_id: str) -> ToolResult:
         try:
+            from uuid import UUID
             account_id = await self._get_current_account_id()
             client = await self.db.client
             
-            profile = await self.pipedream_manager.get_profile(account_id, profile_id)
+            profile = await profile_service.get_profile(UUID(account_id), UUID(profile_id))
             if not profile:
                 return self.fail_response("Credential profile not found")
             
-            agent_result = await client.table('agents').select('config').eq('agent_id', self.agent_id).execute()
-            if agent_result.data:
-                current_config = agent_result.data[0].get('config', {})
-                current_tools = current_config.get('tools', {})
-                current_custom_mcps = current_tools.get('custom_mcp', [])
+            agent_result = await client.table('agents').select('current_version_id').eq('agent_id', self.agent_id).execute()
+            if agent_result.data and agent_result.data[0].get('current_version_id'):
+                version_result = await client.table('agent_versions')\
+                    .select('config')\
+                    .eq('version_id', agent_result.data[0]['current_version_id'])\
+                    .maybe_single()\
+                    .execute()
                 
-                updated_mcps = [mcp for mcp in current_custom_mcps if mcp.get('config', {}).get('profile_id') != str(profile.profile_id)]
-                
-                if len(updated_mcps) != len(current_custom_mcps):
-                    current_tools['custom_mcp'] = updated_mcps
-                    current_config['tools'] = current_tools
+                if version_result.data and version_result.data.get('config'):
+                    current_config = version_result.data['config']
+                    current_tools = current_config.get('tools', {})
+                    current_custom_mcps = current_tools.get('custom_mcp', [])
                     
-                    await client.table('agents').update({
-                        'config': current_config
-                    }).eq('agent_id', self.agent_id).execute()
+                    updated_mcps = [mcp for mcp in current_custom_mcps if mcp.get('config', {}).get('profile_id') != str(profile.profile_id)]
+                    
+                    if len(updated_mcps) != len(current_custom_mcps):
+                        from agent.versioning.version_service import get_version_service
+                        try:
+                            current_tools['custom_mcp'] = updated_mcps
+                            current_config['tools'] = current_tools
+                            
+                            version_service = await get_version_service()
+                            await version_service.create_version(
+                                agent_id=self.agent_id,
+                                user_id=account_id,
+                                system_prompt=current_config.get('system_prompt', ''),
+                                configured_mcps=current_config.get('tools', {}).get('mcp', []),
+                                custom_mcps=updated_mcps,
+                                agentpress_tools=current_config.get('tools', {}).get('agentpress', {}),
+                                change_description=f"Deleted credential profile {profile.display_name}"
+                            )
+                        except Exception as e:
+                            return self.fail_response(f"Failed to update agent config: {str(e)}")
             
-            await self.pipedream_manager.delete_profile(account_id, profile_id)
+            await profile_service.delete_profile(UUID(account_id), UUID(profile_id))
             
             return self.success_response({
                 "message": f"Successfully deleted credential profile '{profile.display_name}' for {profile.app_name}",

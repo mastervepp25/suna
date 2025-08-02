@@ -1,10 +1,9 @@
 import React, { useRef, useState, useCallback } from 'react';
 import { ArrowDown, CircleDashed, CheckCircle, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Markdown } from '@/components/ui/markdown';
 import { UnifiedMessage, ParsedContent, ParsedMetadata } from '@/components/thread/types';
 import { FileAttachmentGrid } from '@/components/thread/file-attachment';
-import { useFilePreloader, FileCache } from '@/hooks/react-query/files';
+import { useFilePreloader } from '@/hooks/react-query/files';
 import { useAuth } from '@/components/AuthProvider';
 import { Project } from '@/lib/api';
 import {
@@ -13,13 +12,10 @@ import {
     getUserFriendlyToolName,
     safeJsonParse,
 } from '@/components/thread/utils';
-import { formatMCPToolDisplayName } from '@/components/thread/tool-views/mcp-tool/_utils';
 import { KortixLogo } from '@/components/sidebar/kortix-logo';
 import { AgentLoader } from './loader';
-import { parseXmlToolCalls, isNewXmlFormat, extractToolNameFromStream } from '@/components/thread/tool-views/xml-parser';
-import { parseToolResult } from '@/components/thread/tool-views/tool-result-parser';
+import { parseXmlToolCalls, isNewXmlFormat } from '@/components/thread/tool-views/xml-parser';
 import { ShowToolStream } from './ShowToolStream';
-import { PipedreamConnectButton } from './pipedream-connect-button';
 import { PipedreamUrlDetector } from './pipedream-url-detector';
 
 const HIDE_STREAMING_XML_TAGS = new Set([
@@ -49,30 +45,12 @@ const HIDE_STREAMING_XML_TAGS = new Set([
     'crawl-webpage',
     'web-search',
     'see-image',
-    'call-mcp-tool',
-
     'execute_data_provider_call',
     'execute_data_provider_endpoint',
 
     'execute-data-provider-call',
     'execute-data-provider-endpoint',
 ]);
-
-function getEnhancedToolDisplayName(toolName: string, rawXml?: string): string {
-    if (toolName === 'call-mcp-tool' && rawXml) {
-        const toolNameMatch = rawXml.match(/tool_name="([^"]+)"/);
-        if (toolNameMatch) {
-            const fullToolName = toolNameMatch[1];
-            const parts = fullToolName.split('_');
-            if (parts.length >= 3 && fullToolName.startsWith('mcp_')) {
-                const serverName = parts[1];
-                const toolNamePart = parts.slice(2).join('_');
-                return formatMCPToolDisplayName(serverName, toolNamePart);
-            }
-        }
-    }
-    return getUserFriendlyToolName(toolName);
-}
 
 // Helper function to render attachments (keeping original implementation for now)
 export function renderAttachments(attachments: string[], fileViewerHandler?: (filePath?: string, filePathList?: string[]) => void, sandboxId?: string, project?: Project) {
@@ -109,7 +87,6 @@ export function renderMarkdownContent(
         );
     }
 
-    // Check if content contains the new Cursor-style format
     if (isNewXmlFormat(content)) {
         const contentParts: React.ReactNode[] = [];
         let lastIndex = 0;
@@ -334,6 +311,7 @@ export interface ThreadContentProps {
     agentName?: string;
     agentAvatar?: React.ReactNode;
     emptyStateComponent?: React.ReactNode; // Add custom empty state component prop
+    threadMetadata?: any; // Add thread metadata prop
 }
 
 export const ThreadContent: React.FC<ThreadContentProps> = ({
@@ -356,6 +334,7 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
     agentName = 'Suna',
     agentAvatar = <KortixLogo size={16} />,
     emptyStateComponent,
+    threadMetadata,
 }) => {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -373,6 +352,66 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
 
     // In playback mode, we use visibleMessages instead of messages
     const displayMessages = readOnly && visibleMessages ? visibleMessages : messages;
+
+    // Helper function to get agent info robustly
+    const getAgentInfo = useCallback(() => {
+        // First check thread metadata for is_agent_builder flag
+        if (threadMetadata?.is_agent_builder) {
+            return {
+                name: 'Agent Builder',
+                avatar: (
+                    <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                        <span className="text-lg">🤖</span>
+                    </div>
+                )
+            };
+        }
+
+        // Then check recent messages for agent info
+        const recentAssistantWithAgent = [...displayMessages].reverse().find(msg =>
+            msg.type === 'assistant' && (msg.agents?.avatar || msg.agents?.avatar_color || msg.agents?.name)
+        );
+
+        if (recentAssistantWithAgent?.agents?.name === 'Agent Builder') {
+            return {
+                name: 'Agent Builder',
+                avatar: (
+                    <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                        <span className="text-lg">🤖</span>
+                    </div>
+                )
+            };
+        }
+
+        if (recentAssistantWithAgent?.agents?.name) {
+            const isSunaAgent = recentAssistantWithAgent.agents.name === 'Suna';
+            const avatar = recentAssistantWithAgent.agents.avatar ? (
+                <>
+                    {isSunaAgent ? (
+                        <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                            <KortixLogo size={16} />
+                        </div>
+                    ) : (
+                        <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                            <span className="text-lg">{recentAssistantWithAgent.agents.avatar}</span>
+                        </div>
+                    )}
+                </>
+            ) : (
+                <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
+                    <KortixLogo size={16} />
+                </div>
+            );
+            return {
+                name: recentAssistantWithAgent.agents.name,
+                avatar
+            };
+        }
+        return {
+            name: agentName || 'Suna',
+            avatar: agentAvatar
+        };
+    }, [threadMetadata, displayMessages, agentName, agentAvatar]);
 
     const handleScroll = () => {
         if (!messagesContainerRef.current) return;
@@ -647,44 +686,10 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                                 <div className="flex flex-col gap-2">
                                                     <div className="flex items-center">
                                                         <div className="rounded-md flex items-center justify-center relative">
-                                                            {(() => {
-                                                                const firstAssistantWithAgent = group.messages.find(msg =>
-                                                                    msg.type === 'assistant' && (msg.agents?.avatar || msg.agents?.avatar_color)
-                                                                );
-
-                                                                const isSunaAgent = firstAssistantWithAgent?.agents?.name === 'Suna';
-
-                                                                if (firstAssistantWithAgent?.agents?.avatar) {
-                                                                    const avatar = firstAssistantWithAgent.agents.avatar;
-                                                                    return (
-                                                                        <>
-                                                                            {isSunaAgent ? (
-                                                                                <div className="h-5 w-5 flex items-center justify-center rounded text-xs">
-                                                                                    <KortixLogo size={16} />
-                                                                                </div>
-                                                                            ) : (
-                                                                                <div
-                                                                                    className="h-5 w-5 flex items-center justify-center rounded text-xs"
-                                                                                >
-                                                                                    <span className="text-lg">{avatar}</span>
-                                                                                </div>
-                                                                            )}
-                                                                        </>
-                                                                    );
-                                                                }
-                                                                return <KortixLogo size={16} />;
-                                                            })()}
+                                                            {getAgentInfo().avatar}
                                                         </div>
                                                         <p className='ml-2 text-sm text-muted-foreground'>
-                                                            {(() => {
-                                                                const firstAssistantWithAgent = group.messages.find(msg =>
-                                                                    msg.type === 'assistant' && msg.agents?.name
-                                                                );
-                                                                if (firstAssistantWithAgent?.agents?.name) {
-                                                                    return firstAssistantWithAgent.agents.name;
-                                                                }
-                                                                return 'Suna';
-                                                            })()}
+                                                            {getAgentInfo().name}
                                                         </p>
                                                     </div>
 
@@ -910,9 +915,11 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                             {/* Logo positioned above the loader */}
                                             <div className="flex items-center">
                                                 <div className="rounded-md flex items-center justify-center">
-                                                    {agentAvatar}
+                                                    {getAgentInfo().avatar}
                                                 </div>
-                                                <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                                <p className='ml-2 text-sm text-muted-foreground'>
+                                                    {getAgentInfo().name}
+                                                </p>
                                             </div>
 
                                             {/* Loader content */}
@@ -922,17 +929,17 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         </div>
                                     </div>
                                 )}
-
-                            {/* For playback mode - Show tool call animation if active */}
                             {readOnly && currentToolCall && (
                                 <div ref={latestMessageRef}>
                                     <div className="flex flex-col gap-2">
                                         {/* Logo positioned above the tool call */}
                                         <div className="flex justify-start">
                                             <div className="rounded-md flex items-center justify-center">
-                                                {agentAvatar}
+                                                {getAgentInfo().avatar}
                                             </div>
-                                            <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                            <p className='ml-2 text-sm text-muted-foreground'>
+                                                {getAgentInfo().name}
+                                            </p>
                                         </div>
 
                                         {/* Tool call content */}
@@ -955,9 +962,11 @@ export const ThreadContent: React.FC<ThreadContentProps> = ({
                                         {/* Logo positioned above the streaming indicator */}
                                         <div className="flex justify-start">
                                             <div className="rounded-md flex items-center justify-center">
-                                                {agentAvatar}
+                                                {getAgentInfo().avatar}
                                             </div>
-                                            <p className='ml-2 text-sm text-muted-foreground'>{agentName || 'Suna'}</p>
+                                            <p className='ml-2 text-sm text-muted-foreground'>
+                                                {getAgentInfo().name}
+                                            </p>
                                         </div>
 
                                         {/* Streaming indicator content */}

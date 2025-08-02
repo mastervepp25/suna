@@ -1,7 +1,7 @@
 from tavily import AsyncTavilyClient
 import httpx
 from dotenv import load_dotenv
-from agentpress.tool import Tool, ToolResult, openapi_schema, xml_schema
+from agentpress.tool import Tool, ToolResult, openapi_schema, usage_example
 from utils.config import config
 from sandbox.tool_base import SandboxToolsBase
 from agentpress.thread_manager import ThreadManager
@@ -55,13 +55,7 @@ class SandboxWebSearchTool(SandboxToolsBase):
             }
         }
     })
-    @xml_schema(
-        tag_name="web-search",
-        mappings=[
-            {"param_name": "query", "node_type": "attribute", "path": "."},
-            {"param_name": "num_results", "node_type": "attribute", "path": "."}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="web_search">
         <parameter name="query">what is Kortix AI and what are they building?</parameter>
@@ -76,8 +70,7 @@ class SandboxWebSearchTool(SandboxToolsBase):
         <parameter name="num_results">20</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def web_search(
         self, 
         query: str,
@@ -161,19 +154,13 @@ class SandboxWebSearchTool(SandboxToolsBase):
             }
         }
     })
-    @xml_schema(
-        tag_name="scrape-webpage",
-        mappings=[
-            {"param_name": "urls", "node_type": "attribute", "path": "."}
-        ],
-        example='''
+    @usage_example('''
         <function_calls>
         <invoke name="scrape_webpage">
         <parameter name="urls">https://www.kortix.ai/,https://github.com/kortix-ai/suna</parameter>
         </invoke>
         </function_calls>
-        '''
-    )
+        ''')
     async def scrape_webpage(
         self,
         urls: str
@@ -210,26 +197,25 @@ class SandboxWebSearchTool(SandboxToolsBase):
             
             logging.info(f"Processing {len(url_list)} URLs: {url_list}")
             
-            # Process each URL and collect results
-            results = []
-            for url in url_list:
-                try:
-                    # Add protocol if missing
-                    if not (url.startswith('http://') or url.startswith('https://')):
-                        url = 'https://' + url
-                        logging.info(f"Added https:// protocol to URL: {url}")
-                    
-                    # Scrape this URL
-                    result = await self._scrape_single_url(url)
-                    results.append(result)
-                    
-                except Exception as e:
-                    logging.error(f"Error processing URL {url}: {str(e)}")
-                    results.append({
-                        "url": url,
+            # Process each URL concurrently and collect results
+            tasks = [self._scrape_single_url(url) for url in url_list]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results, handling exceptions
+            processed_results = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logging.error(f"Error processing URL {url_list[i]}: {str(result)}")
+                    processed_results.append({
+                        "url": url_list[i],
                         "success": False,
-                        "error": str(e)
+                        "error": str(result)
                     })
+                else:
+                    processed_results.append(result)
+            
+            results = processed_results
+
             
             # Summarize results
             successful = sum(1 for r in results if r.get("success", False))
@@ -268,6 +254,12 @@ class SandboxWebSearchTool(SandboxToolsBase):
         """
         Helper function to scrape a single URL and return the result information.
         """
+        
+        # # Add protocol if missing
+        # if not (url.startswith('http://') or url.startswith('https://')):
+        #     url = 'https://' + url
+        #     logging.info(f"Added https:// protocol to URL: {url}")
+            
         logging.info(f"Scraping single URL: {url}")
         
         try:
@@ -285,7 +277,7 @@ class SandboxWebSearchTool(SandboxToolsBase):
                 
                 # Use longer timeout and retry logic for more reliability
                 max_retries = 3
-                timeout_seconds = 120
+                timeout_seconds = 30
                 retry_count = 0
                 
                 while retry_count < max_retries:
